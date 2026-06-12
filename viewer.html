@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MemCore Dashboard</title>
+  <meta name="description" content="A photography-first local memory server dashboard for AI coding agents." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <style>
+    /* ─── Apple Design Tokens & CSS Reset ──────────────────────────────── */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      /* Colors */
+      --primary: #0066cc;
+      --primary-focus: #0071e3;
+      --primary-on-dark: #2997ff;
+      --ink: #1d1d1f;
+      --body: #1d1d1f;
+      --body-muted: #86868b;
+      --canvas: #ffffff;
+      --canvas-parchment: #f5f5f7;
+      --surface-pearl: #fafafc;
+      --surface-black: #000000;
+      --surface-chip-translucent: rgba(210, 210, 215, 0.64);
+      --on-primary: #ffffff;
+      --on-dark: #ffffff;
+      --hairline: #d2d2d7;
+      --divider-soft: rgba(0, 0, 0, 0.04);
+      --danger: #df382c;
+      --danger-bg: rgba(223, 56, 44, 0.08);
+      --success: #1d9d55;
+      
+      /* Typography System */
+      --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+      --font-text: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+      --font-mono: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+      
+      /* Spacing Scale */
+      --space-xxs: 4px;
+      --space-xs: 8px;
+      --space-sm: 12px;
+      --space-md: 17px;
+      --space-lg: 24px;
+      --space-xl: 32px;
+      --space-xxl: 48px;
+      --space-section: 80px;
+
+      /* Corner Radii */
+      --rounded-xs: 5px;
+      --rounded-sm: 8px;
+      --rounded-md: 11px;
+      --rounded-lg: 18px;
+      --rounded-pill: 9999px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--canvas-parchment);
+      color: var(--body);
+      font-family: var(--font-text);
+      font-size: 17px;
+      line-height: 1.44;
+      letter-spacing: -0.374px;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      font-feature-settings: "ss03", "cv10", "zero";
+    }
+
+    /* ─── Global Nav ─────────────────────────────────────────────────── */
+    .global-nav {
+      height: 44px;
+      background: var(--surface-black);
+      color: var(--on-dark);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 var(--space-lg);
+      position: relative;
+      z-index: 100;
+      flex-shrink: 0;
+    }
+
+    .logo-area {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      font-family: var(--font-display);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.12px;
+    }
+
+    .logo-area i {
+      color: var(--primary-on-dark);
+      font-size: 15px;
+    }
+
+    .logo-version {
+      font-size: 10px;
+      color: var(--body-muted);
+      font-weight: 400;
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+
+    /* ─── Sub Nav Frosted ────────────────────────────────────────────── */
+    .sub-nav-frosted {
+      height: 52px;
+      background: rgba(245, 245, 247, 0.8);
+      backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid var(--hairline);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 var(--space-lg);
+      position: relative;
+      z-index: 90;
+      flex-shrink: 0;
+    }
+
+    .sub-nav-title {
+      font-family: var(--font-display);
+      font-size: 21px;
+      font-weight: 600;
+      line-height: 1.19;
+      letter-spacing: 0.231px;
+      color: var(--ink);
+    }
+
+    /* Apple-Store Option Chips (Navigation) */
+    .nav-tabs {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: var(--space-xs);
+      align-items: center;
+    }
+
+    .nav-tab-chip {
+      font-family: var(--font-text);
+      font-size: 14px;
+      font-weight: 400;
+      color: var(--ink);
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-pill);
+      padding: 6px 14px;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s ease-out;
+      outline: none;
+    }
+
+    .nav-tab-chip:hover {
+      background: var(--surface-pearl);
+      border-color: #b0b0b5;
+    }
+
+    .nav-tab-chip.active {
+      background: var(--ink);
+      color: var(--on-dark);
+      border-color: var(--ink);
+    }
+
+    .nav-tab-chip:active {
+      transform: scale(0.96);
+    }
+
+    /* ─── Layout Chassis ──────────────────────────────────────────────── */
+    .layout-container {
+      display: flex;
+      height: calc(100% - 96px);
+      overflow: hidden;
+      max-width: 1380px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* ─── Sidebar ─────────────────────────────────────────────────────── */
+    .sidebar {
+      width: 290px;
+      border-right: 1px solid var(--hairline);
+      padding: var(--space-lg);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xl);
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .sidebar-section-title {
+      font-family: var(--font-display);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--body-muted);
+      margin-bottom: var(--space-xs);
+    }
+
+    /* Apple-style Filter Dropdown */
+    .project-filter-wrap {
+      position: relative;
+    }
+
+    .select-utility {
+      width: 100%;
+      font-family: var(--font-text);
+      font-size: 14px;
+      color: var(--ink);
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-sm);
+      padding: 10px 14px;
+      outline: none;
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='%231d1d1f'%3E%3Cpath d='M0 1.5L6 7.5L12 1.5L10.5 0L6 4.5L1.5 0L0 1.5Z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      transition: border-color 0.15s ease;
+    }
+
+    .select-utility:focus {
+      border-color: var(--primary);
+    }
+
+    /* Metrics Grid */
+    .metrics-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-sm);
+    }
+
+    .metric-item {
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-md);
+      padding: 14px var(--space-md);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .metric-label {
+      font-size: 14px;
+      color: var(--body-muted);
+    }
+
+    .metric-value {
+      font-family: var(--font-mono);
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    /* ─── Main Content Canvas ─────────────────────────────────────────── */
+    .main-canvas {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: var(--space-lg);
+      gap: var(--space-lg);
+    }
+
+    /* Content Toolbar */
+    .canvas-toolbar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-md);
+      flex-shrink: 0;
+    }
+
+    .canvas-title {
+      font-family: var(--font-display);
+      font-size: 28px;
+      font-weight: 600;
+      line-height: 1.14;
+      letter-spacing: -0.28px;
+      color: var(--ink);
+    }
+
+    /* Apple-style search box (pill shape) */
+    .search-pill-wrap {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-pill-wrap i {
+      position: absolute;
+      left: var(--space-md);
+      color: var(--body-muted);
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    .search-input-field {
+      width: 100%;
+      height: 40px;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: var(--font-text);
+      font-size: 14px;
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-pill);
+      padding: 0 16px 0 38px;
+      outline: none;
+      transition: all 0.15s ease-out;
+    }
+
+    .search-input-field:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
+    }
+
+    /* Scrollable Container */
+    .list-container {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-md);
+      padding-bottom: var(--space-lg);
+    }
+
+    /* ─── Button Grammars ────────────────────────────────────────────── */
+    .btn-pill {
+      font-family: var(--font-text);
+      font-size: 14px;
+      font-weight: 400;
+      border: none;
+      border-radius: var(--rounded-pill);
+      padding: 8px 18px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      outline: none;
+      user-select: none;
+    }
+
+    .btn-pill:active {
+      transform: scale(0.96);
+    }
+
+    .btn-pill.primary {
+      background: var(--primary);
+      color: var(--on-primary);
+    }
+
+    .btn-pill.primary:hover {
+      background: var(--primary-focus);
+    }
+
+    .btn-pill.ghost {
+      background: var(--canvas);
+      color: var(--primary);
+      border: 1px solid var(--primary);
+    }
+
+    .btn-pill.ghost:hover {
+      background: rgba(0, 102, 204, 0.05);
+    }
+
+    .btn-pill-utility {
+      font-family: var(--font-text);
+      font-size: 12px;
+      font-weight: 400;
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-pill);
+      background: var(--surface-pearl);
+      color: var(--ink);
+      padding: 6px 14px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn-pill-utility:hover {
+      background: var(--canvas-parchment);
+      border-color: #b0b0b5;
+    }
+
+    .btn-pill-utility:active {
+      transform: scale(0.96);
+    }
+
+    /* Status Dot Pill */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-xxs);
+      font-family: var(--font-text);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: var(--rounded-pill);
+      border: 1px solid transparent;
+      user-select: none;
+    }
+
+    .status-badge.online {
+      color: var(--success);
+      border-color: rgba(29, 157, 85, 0.25);
+      background: rgba(29, 157, 85, 0.06);
+    }
+
+    .status-badge.offline {
+      color: var(--danger);
+      border-color: rgba(223, 56, 44, 0.25);
+      background: rgba(223, 56, 44, 0.06);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse-ring 2s infinite;
+    }
+
+    @keyframes pulse-ring {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* ─── Apple Cards (Flat, No Shadows, rounded.lg) ────────────────── */
+    .card-tile {
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-lg);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-sm);
+      position: relative;
+      animation: anim-fade-in 0.3s cubic-bezier(0.25, 1, 0.5, 1) both;
+    }
+
+    @keyframes anim-fade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Card Header Meta Row */
+    .tile-meta-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      font-size: 12px;
+      color: var(--body-muted);
+      flex-wrap: wrap;
+    }
+
+    /* Muted Apple-style Labels */
+    .tag-chip {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: var(--rounded-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.25px;
+      font-family: var(--font-text);
+      display: inline-block;
+    }
+
+    .tag-chip.project {
+      background: rgba(0, 102, 204, 0.06);
+      color: var(--primary);
+      border: 1px solid rgba(0, 102, 204, 0.12);
+    }
+
+    .tag-chip.type {
+      background: var(--canvas-parchment);
+      color: var(--ink);
+      border: 1px solid var(--hairline);
+    }
+
+    .tag-chip.strength {
+      background: rgba(29, 157, 85, 0.06);
+      color: var(--success);
+      border: 1px solid rgba(29, 157, 85, 0.12);
+    }
+
+    .tag-chip.uuid {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      background: var(--surface-pearl);
+      color: var(--body-muted);
+      border: 1px solid var(--hairline);
+      text-transform: none;
+    }
+
+    /* Card Main Text Content */
+    .tile-content {
+      font-family: var(--font-text);
+      font-size: 16px;
+      line-height: 1.5;
+      color: var(--ink);
+      white-space: pre-wrap;
+    }
+
+    /* Card Tag / File footer row */
+    .tile-footer-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .pill-label {
+      font-size: 12px;
+      background: var(--canvas-parchment);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-pill);
+      padding: 3px 10px;
+      color: var(--ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .pill-label.file {
+      color: var(--primary);
+      border-color: rgba(0, 102, 204, 0.15);
+      background: rgba(0, 102, 204, 0.03);
+    }
+
+    .pill-label.file i {
+      font-size: 11px;
+    }
+
+    /* Interactive Scoring Indicators (Cosine & BM25) */
+    .score-badge-group {
+      display: inline-flex;
+      gap: 6px;
+      margin-left: auto;
+      align-items: center;
+    }
+
+    .score-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--body-muted);
+      background: var(--surface-pearl);
+      border: 1px solid var(--hairline);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* Action Buttons Inside Cards */
+    .card-actions-wrap {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xxs);
+      margin-left: auto;
+    }
+
+    .btn-circle-utility {
+      width: 28px;
+      height: 28px;
+      border-radius: var(--rounded-full);
+      border: 1px solid var(--hairline);
+      background: var(--canvas);
+      color: var(--body-muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn-circle-utility:hover {
+      color: var(--danger);
+      background: var(--danger-bg);
+      border-color: rgba(223, 56, 44, 0.2);
+    }
+
+    .btn-circle-utility:active {
+      transform: scale(0.92);
+    }
+
+    /* ─── Lessons View Confidence bar ────────────────────────────── */
+    .lesson-conf-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: var(--space-xxs);
+    }
+
+    .conf-metric-tag {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--primary);
+      min-width: 26px;
+    }
+
+    .conf-track-bar {
+      flex: 1;
+      height: 6px;
+      background: var(--canvas-parchment);
+      border-radius: var(--rounded-pill);
+      overflow: hidden;
+      border: 1px solid var(--hairline);
+    }
+
+    .conf-fill-bar {
+      height: 100%;
+      background: var(--primary);
+      border-radius: var(--rounded-pill);
+      transition: width 0.4s ease;
+    }
+
+    /* ─── Slots View Grid & Textarea ─────────────────────────────── */
+    .slots-layout-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: var(--space-md);
+    }
+
+    .slot-title-text {
+      font-family: var(--font-mono);
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--primary);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .slot-title-text i {
+      font-size: 11px;
+    }
+
+    .slot-desc-text {
+      font-size: 13px;
+      color: var(--body-muted);
+    }
+
+    .slot-editor-textarea {
+      width: 100%;
+      min-height: 100px;
+      background: var(--surface-pearl);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-sm);
+      padding: 12px;
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    .slot-editor-textarea:focus {
+      border-color: var(--primary);
+      background: var(--canvas);
+    }
+
+    /* ─── Sessions View Timeline ─────────────────────────────────── */
+    .timeline-wrapper {
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      padding-left: var(--space-md);
+    }
+
+    .timeline-wrapper::before {
+      content: '';
+      position: absolute;
+      left: 3px;
+      top: 10px;
+      bottom: 10px;
+      width: 1px;
+      background: var(--hairline);
+    }
+
+    .timeline-node {
+      display: flex;
+      gap: var(--space-md);
+      padding: var(--space-sm) 0;
+      position: relative;
+    }
+
+    .timeline-bullet {
+      width: 7px;
+      height: 7px;
+      border-radius: var(--rounded-full);
+      background: var(--ink);
+      position: absolute;
+      left: -16px;
+      top: 20px;
+      box-shadow: 0 0 0 3px var(--canvas-parchment);
+    }
+
+    .timeline-bullet.running {
+      background: var(--primary);
+      box-shadow: 0 0 0 3px var(--canvas-parchment), 0 0 8px rgba(0, 102, 204, 0.4);
+    }
+
+    .timeline-node-card {
+      flex: 1;
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-md);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .timeline-node-title {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .timeline-node-meta {
+      font-size: 13px;
+      color: var(--body-muted);
+      display: flex;
+      gap: var(--space-md);
+      flex-wrap: wrap;
+    }
+
+    .timeline-node-meta span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* ─── Forms / Modals ─────────────────────────────────────────────── */
+    .new-mem-form-card {
+      background: var(--canvas);
+      border: 2px solid var(--hairline);
+      border-radius: var(--rounded-lg);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-md);
+      animation: anim-fade-in 0.2s ease-out;
+    }
+
+    .form-section-title {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--ink);
+      border-bottom: 1px solid var(--hairline);
+      padding-bottom: 8px;
+      margin-bottom: 4px;
+    }
+
+    .grid-form-row {
+      display: flex;
+      gap: var(--space-md);
+    }
+
+    .input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+    }
+
+    .input-label {
+      font-family: var(--font-display);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--body-muted);
+    }
+
+    .field-input, .field-textarea, .field-select {
+      background: var(--surface-pearl);
+      border: 1px solid var(--hairline);
+      border-radius: var(--rounded-sm);
+      padding: 10px 12px;
+      color: var(--ink);
+      font-family: var(--font-text);
+      font-size: 14px;
+      outline: none;
+      transition: all 0.15s ease;
+    }
+
+    .field-input:focus, .field-textarea:focus, .field-select:focus {
+      border-color: var(--primary);
+      background: var(--canvas);
+    }
+
+    .field-textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    .field-select {
+      appearance: none;
+      cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='%231d1d1f'%3E%3Cpath d='M0 1.5L6 7.5L12 1.5L10.5 0L6 4.5L1.5 0L0 1.5Z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      padding-right: 36px;
+    }
+
+    .form-actions-row {
+      display: flex;
+      justify-content: flex-end;
+      gap: var(--space-sm);
+      margin-top: 4px;
+    }
+
+    /* ─── Empty State ────────────────────────────────────────────────── */
+    .empty-state-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: var(--space-section) var(--space-xl);
+      gap: var(--space-sm);
+      color: var(--body-muted);
+      text-align: center;
+      background: var(--canvas);
+      border: 1px dashed var(--hairline);
+      border-radius: var(--rounded-lg);
+    }
+
+    .empty-state-card i {
+      font-size: 36px;
+      color: var(--hairline);
+    }
+
+    .empty-state-card p {
+      font-size: 14px;
+    }
+
+    /* Shimmer Skeleton */
+    .skeleton-bar {
+      background: linear-gradient(90deg, rgba(0, 0, 0, 0.03) 25%, rgba(0, 0, 0, 0.06) 50%, rgba(0, 0, 0, 0.03) 75%);
+      background-size: 200% 100%;
+      animation: shimmer-anim 1.5s infinite;
+      border-radius: var(--rounded-md);
+      height: 90px;
+      border: 1px solid var(--hairline);
+    }
+
+    @keyframes shimmer-anim {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* ─── Notification Toast ────────────────────────────────────────── */
+    #notificationToast {
+      position: fixed;
+      bottom: var(--space-lg);
+      right: var(--space-lg);
+      z-index: 1000;
+      padding: 10px 18px;
+      border-radius: var(--rounded-md);
+      font-family: var(--font-text);
+      font-size: 14px;
+      font-weight: 600;
+      background: rgba(29, 29, 31, 0.98);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--on-dark);
+      backdrop-filter: blur(20px);
+      box-shadow: none;
+      transform: translateY(12px);
+      opacity: 0;
+      transition: all 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+      pointer-events: none;
+    }
+
+    #notificationToast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    #notificationToast.success {
+      border-color: rgba(29, 157, 85, 0.4);
+      color: #34c759;
+    }
+
+    #notificationToast.error {
+      border-color: rgba(223, 56, 44, 0.4);
+      color: #ff3b30;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--surface-chip-translucent);
+      border-radius: 999px;
+      border: 2px solid var(--canvas-parchment);
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #a2a2a7;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Global Nav (True Black) -->
+  <div class="global-nav">
+    <div class="logo-area">
+      <i class="fa-solid fa-cube"></i>
+      <span>MemCore Server<span class="logo-version"> v3.0.0</span></span>
+    </div>
+    <div class="nav-actions">
+      <div class="status-badge offline" id="statusBadge">
+        <div class="status-dot"></div>
+        <span id="statusText">Offline</span>
+      </div>
+      <button class="btn-pill-utility" id="btnConsolidate" title="Run database decay & consolidation">
+        <i class="fa-solid fa-wand-magic-sparkles"></i> Consolidate
+      </button>
+      <button class="btn-pill-utility" id="btnExport" title="Export database to JSON file">
+        <i class="fa-solid fa-download"></i> Export
+      </button>
+    </div>
+  </div>
+
+  <!-- Sub Nav (Frosted Glass) -->
+  <div class="sub-nav-frosted">
+    <span class="sub-nav-title" id="subNavTitle">MemCore Dashboard</span>
+    
+    <!-- Option Chips Tabs -->
+    <div class="nav-tabs">
+      <button class="nav-tab-chip active" data-tab="memories" onclick="switchTab('memories', this)">Memories</button>
+      <button class="nav-tab-chip" data-tab="sessions" onclick="switchTab('sessions', this)">Sessions</button>
+      <button class="nav-tab-chip" data-tab="lessons" onclick="switchTab('lessons', this)">Lessons</button>
+      <button class="nav-tab-chip" data-tab="slots" onclick="switchTab('slots', this)">Slots</button>
+      <button class="nav-tab-chip" data-tab="observations" onclick="switchTab('observations', this)">Observations</button>
+    </div>
+
+    <!-- Main Action Pill -->
+    <button class="btn-pill primary" id="btnNew" onclick="toggleNewForm()">
+      <i class="fa-solid fa-plus"></i> New Memory
+    </button>
+  </div>
+
+  <!-- Main Grid Chassis -->
+  <div class="layout-container">
+    
+    <!-- Sidebar Filters & Counters -->
+    <div class="sidebar">
+      <div>
+        <div class="sidebar-section-title">Filter Project</div>
+        <div class="project-filter-wrap">
+          <select class="select-utility" id="projectFilter" onchange="onProjectChange()">
+            <option value="">All Projects</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <div class="sidebar-section-title">Database Stats</div>
+        <div class="metrics-list">
+          <div class="metric-item">
+            <span class="metric-label">Sessions (Active)</span>
+            <span class="metric-value" id="stat-sessions">—</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Memories</span>
+            <span class="metric-value" id="stat-memories">—</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Lessons</span>
+            <span class="metric-value" id="stat-lessons">—</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Slots</span>
+            <span class="metric-value" id="stat-slots">—</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Observations</span>
+            <span class="metric-value" id="stat-observations">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Workspace -->
+    <div class="main-canvas">
+      
+      <!-- Toolbar -->
+      <div class="canvas-toolbar">
+        <span class="canvas-title" id="canvasTitle">Memories</span>
+        <div class="search-pill-wrap" id="searchBarWrap">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <input type="text" class="search-input-field" id="searchInput" placeholder="Search memories via hybrid FTS5 + vector..." oninput="debounceSearch()" />
+        </div>
+      </div>
+
+      <!-- Scrollable List -->
+      <div class="list-container" id="cardBody">
+        <div class="skeleton-bar"></div>
+        <div class="skeleton-bar" style="animation-delay:0.1s;height:65px"></div>
+        <div class="skeleton-bar" style="animation-delay:0.2s;height:110px"></div>
+      </div>
+      
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="notificationToast"></div>
+
+<script>
+  // ─── Configurations ───────────────────────────────────────────────────
+  const API = window.location.protocol === 'file:' 
+    ? `http://localhost:${new URLSearchParams(window.location.search).get('port') || '3111'}` 
+    : '';
+  const POLL_INTERVAL_MS = 3000;
+
+  // ─── App State ────────────────────────────────────────────────────────
+  let currentTab = 'memories';
+  let selectedProject = '';
+  let searchDebounceTimer = null;
+  let showNewForm = false;
+  let isOnline = false;
+
+  // ─── DOM Helper Shortcuts ─────────────────────────────────────────────
+  const q = id => document.getElementById(id);
+  const esc = str => str == null ? '' : String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+
+  function fmtDate(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function fmtAgo(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    const s = Math.floor(diff / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
+  function showToast(msg, type = '') {
+    const t = q('notificationToast');
+    t.textContent = msg;
+    t.className = `show ${type}`;
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => { t.className = ''; }, 2800);
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(API + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+    return res.json();
+  }
+
+  // ─── Status Liveness Check ────────────────────────────────────────────
+  async function checkStatus() {
+    try {
+      await api('/agentmemory/livez');
+      if (!isOnline) {
+        isOnline = true;
+        q('statusBadge').className = 'status-badge online';
+        q('statusText').textContent = 'Server Online';
+      }
+    } catch {
+      isOnline = false;
+      q('statusBadge').className = 'status-badge offline';
+      q('statusText').textContent = 'Server Offline';
+    }
+  }
+
+  // ─── Update Stat Counters ─────────────────────────────────────────────
+  async function updateStats() {
+    try {
+      const s = await api('/agentmemory/stats');
+      
+      const activeSess = s.active_sessions ?? 0;
+      const totalSess = s.total_sessions ?? (s.sessions ?? 0);
+      const sessStr = `${activeSess} / ${totalSess}`;
+      
+      const elSess = q('stat-sessions');
+      if (elSess && elSess.textContent !== sessStr) elSess.textContent = sessStr;
+
+      const keys = ['memories', 'observations', 'lessons', 'slots'];
+      keys.forEach(k => {
+        const v = s[k] ?? 0;
+        const el = q(`stat-${k}`);
+        if (el && el.textContent !== String(v)) el.textContent = v;
+      });
+    } catch {}
+  }
+
+  // ─── Project Dropdown Population ──────────────────────────────────────
+  async function loadProjects() {
+    try {
+      const sessions = await api('/agentmemory/sessions');
+      const projects = [...new Set(sessions.map(s => s.project).filter(Boolean))];
+      const sel = q('projectFilter');
+      const cur = sel.value;
+      const opts = [
+        '<option value="">All Projects</option>',
+        ...projects.map(p => `<option value="${esc(p)}" ${p === cur ? 'selected' : ''}>${esc(p)}</option>`)
+      ];
+      sel.innerHTML = opts.join('');
+    } catch {}
+  }
+
+  // ─── Navigation & Tab Switching ────────────────────────────────────────
+  function switchTab(tab, el) {
+    currentTab = tab;
+    showNewForm = false;
+    q('searchInput').value = '';
+    document.querySelectorAll('.nav-tab-chip').forEach(n => n.classList.remove('active'));
+    el.classList.add('active');
+    
+    q('canvasTitle').textContent = {
+      memories: 'Memories',
+      sessions: 'Sessions Log',
+      lessons: 'Lessons Learned',
+      slots: 'Memory Slots',
+      observations: 'Observations Ledger',
+    }[tab] || tab;
+
+    q('searchBarWrap').style.display = ['memories', 'lessons', 'observations'].includes(tab) ? '' : 'none';
+    q('btnNew').style.display = tab === 'memories' ? '' : 'none';
+    loadData();
+  }
+
+  function onProjectChange() {
+    selectedProject = q('projectFilter').value;
+    loadData();
+  }
+
+  // Debounced input helper
+  function debounceSearch() {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(loadData, 280);
+  }
+
+  // ─── Toggle Forms ─────────────────────────────────────────────────────
+  function toggleNewForm() {
+    showNewForm = !showNewForm;
+    loadData();
+    if (showNewForm) {
+      setTimeout(() => q('newContent') && q('newContent').focus(), 50);
+    }
+  }
+
+  function cancelNewForm() {
+    showNewForm = false;
+    loadData();
+  }
+
+  // ─── Render: New Memory Form ──────────────────────────────────────────
+  function renderNewForm() {
+    return `
+      <div class="new-mem-form-card" id="newMemForm">
+        <div class="form-section-title">Add Memory</div>
+        <div class="input-group">
+          <label class="input-label">Memory Content *</label>
+          <textarea class="field-textarea" id="newContent" placeholder="What insight or decision should the agent remember?" rows="3"></textarea>
+        </div>
+        <div class="grid-form-row">
+          <div class="input-group">
+            <label class="input-label">Type</label>
+            <select class="field-select" id="newType">
+              <option value="observation">observation</option>
+              <option value="decision">decision</option>
+              <option value="bug">bug</option>
+              <option value="arch">arch</option>
+              <option value="convention">convention</option>
+              <option value="env">env</option>
+            </select>
+          </div>
+          <div class="input-group">
+            <label class="input-label">Project</label>
+            <input class="field-input" id="newProject" placeholder="Optional project name" />
+          </div>
+        </div>
+        <div class="grid-form-row">
+          <div class="input-group">
+            <label class="input-label">Concepts (comma-separated)</label>
+            <input class="field-input" id="newConcepts" placeholder="e.g. auth, db, refactor" />
+          </div>
+          <div class="input-group">
+            <label class="input-label">Files (comma-separated)</label>
+            <input class="field-input" id="newFiles" placeholder="e.g. index.js, db.sqlite" />
+          </div>
+        </div>
+        <div class="form-actions-row">
+          <button class="btn-pill ghost" onclick="cancelNewForm()">Cancel</button>
+          <button class="btn-pill primary" onclick="submitNewMemory()">
+            <i class="fa-solid fa-floppy-disk"></i> Save Memory
+          </button>
+        </div>
+      </div>`;
+  }
+
+  async function submitNewMemory() {
+    const content = (q('newContent').value || '').trim();
+    if (!content) {
+      showToast('Content is required', 'error');
+      return;
+    }
+    try {
+      await api('/agentmemory/remember', {
+        method: 'POST',
+        body: JSON.stringify({
+          content,
+          type:     q('newType').value || 'observation',
+          project:  q('newProject').value.trim() || undefined,
+          concepts: q('newConcepts').value.trim() || undefined,
+          files:    q('newFiles').value.trim() || undefined,
+        }),
+      });
+      showToast('Memory successfully saved ✓', 'success');
+      showNewForm = false;
+      await loadData();
+      await updateStats();
+    } catch (e) {
+      showToast('Save failed: ' + e.message, 'error');
+    }
+  }
+
+  // ─── Render: Memories Cards ───────────────────────────────────────────
+  function renderMemories(items) {
+    if (!items.length) {
+      return `<div class="empty-state-card"><i class="fa-solid fa-brain"></i><p>No memories found matching the filter.</p></div>`;
+    }
+    return items.map(m => {
+      // Check if vector is stored (string elements)
+      const hasVector = m.embedding && m.embedding !== 'null';
+      const scoreRow = m.score !== undefined 
+        ? `<div class="score-badge-group">
+             <span class="score-badge" title="Combined retrieval score">score: ${m.score.toFixed(3)}</span>
+             <span class="score-badge" title="Cosine Vector similarity">cosine: ${m._cosine !== undefined ? m._cosine.toFixed(3) : '0.000'}</span>
+           </div>`
+        : (hasVector ? `<span class="score-badge" style="margin-left:auto;color:var(--primary)" title="Local vector embedding stored"><i class="fa-solid fa-circle-nodes"></i> embedded</span>` : '');
+
+      return `
+        <div class="card-tile" id="mem-${esc(m.id)}">
+          <div class="tile-meta-row">
+            <span class="tag-chip project">${esc(m.project || 'default')}</span>
+            <span class="tag-chip type">${esc(m.type || 'observation')}</span>
+            <span class="tag-chip strength" title="Memory retention strength (decays over time, reinforced on search)">
+              <i class="fa-solid fa-wave-square" style="margin-right:2px"></i> ${((m.confidence ?? 1.0) * 100).toFixed(0)}%
+            </span>
+            <span>${fmtDate(m.timestamp)}</span>
+            <span style="opacity:0.6">${fmtAgo(m.timestamp)}</span>
+            <span class="tag-chip uuid" title="Session: ${esc(m.session_id)}">session: ${esc((m.session_id || '').slice(0, 8))}…</span>
+            ${scoreRow}
+          </div>
+          <div class="tile-content">${esc(m.content)}</div>
+          <div class="tile-footer-row">
+            ${(m.concepts || '').split(',').filter(Boolean).map(c => `<span class="pill-label">${esc(c.trim())}</span>`).join('')}
+            ${(m.files || '').split(',').filter(Boolean).map(f => `<span class="pill-label file"><i class="fa-solid fa-file-code"></i> ${esc(f.trim())}</span>`).join('')}
+            <div class="card-actions-wrap">
+              <button class="btn-circle-utility" title="Delete memory" onclick="deleteMemory('${esc(m.id)}')">
+                <i class="fa-solid fa-trash-can"></i>
+              </button>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteMemory(id) {
+    if (!confirm('Delete this memory permanently?')) return;
+    try {
+      await api(`/agentmemory/memories/${id}`, { method: 'DELETE' });
+      showToast('Memory successfully deleted', 'success');
+      q(`mem-${id}`)?.remove();
+      await updateStats();
+    } catch (e) {
+      showToast('Delete failed: ' + e.message, 'error');
+    }
+  }
+
+  // ─── Render: Observations Ledger ──────────────────────────────────────
+  function renderObservations(items) {
+    if (!items.length) {
+      return `<div class="empty-state-card"><i class="fa-solid fa-list-ul"></i><p>No observations found.</p></div>`;
+    }
+    return items.map(o => `
+      <div class="card-tile">
+        <div class="tile-meta-row">
+          <span class="tag-chip type">${esc(o.type || 'observation')}</span>
+          <span>${fmtDate(o.timestamp)}</span>
+          <span style="opacity:0.6">${fmtAgo(o.timestamp)}</span>
+          <span class="tag-chip uuid" title="Session: ${esc(o.session_id)}">session: ${esc((o.session_id || '').slice(0, 8))}…</span>
+        </div>
+        <div class="tile-content">${esc(o.content)}</div>
+      </div>`).join('');
+  }
+
+  // ─── Render: Sessions Log Timeline ───────────────────────────────────
+  function renderSessions(items) {
+    if (!items.length) {
+      return `<div class="empty-state-card"><i class="fa-solid fa-timeline"></i><p>No sessions recorded yet.</p></div>`;
+    }
+    const nodes = items.map(s => `
+      <div class="timeline-node">
+        <div class="timeline-bullet ${!s.ended_at ? 'running' : ''}"></div>
+        <div class="timeline-node-card">
+          <div class="timeline-node-title">
+            <span>${esc(s.project)}</span>
+            ${!s.ended_at ? '<span class="status-badge online" style="font-size:10px;padding:2px 8px">Running</span>' : ''}
+          </div>
+          <div class="timeline-node-meta">
+            <span><i class="fa-solid fa-clock"></i> started ${fmtDate(s.started_at)}</span>
+            ${s.ended_at ? `<span>ended ${fmtAgo(s.ended_at)}</span>` : `<span>running for ${fmtAgo(s.started_at)}</span>`}
+            <span style="font-family:var(--font-mono)">id: ${esc(s.id.slice(0, 16))}…</span>
+            <span><i class="fa-solid fa-folder-open"></i> ${esc(s.cwd)}</span>
+          </div>
+        </div>
+      </div>`).join('');
+    return `<div class="timeline-wrapper">${nodes}</div>`;
+  }
+
+  // ─── Render: Lessons Learned ──────────────────────────────────────────
+  function renderLessons(items) {
+    if (!items.length) {
+      return `<div class="empty-state-card"><i class="fa-solid fa-graduation-cap"></i><p>No lessons saved yet.</p></div>`;
+    }
+    return items.map(l => {
+      const confPercent = Math.min(100, Math.round((l.confidence / 10) * 100));
+      return `
+        <div class="card-tile" id="les-${l.id}">
+          <div class="tile-meta-row">
+            <span class="tag-chip project">${esc(l.project || 'default')}</span>
+            <span>updated ${fmtDate(l.updated_at)}</span>
+          </div>
+          <div class="tile-content" style="font-weight:600">${esc(l.content)}</div>
+          ${l.context ? `<div style="font-family:var(--font-mono);font-size:13px;color:var(--body-muted);background:var(--canvas-parchment);border:1px solid var(--hairline);border-radius:var(--rounded-sm);padding:10px 14px;white-space:pre-wrap;overflow-x:auto">${esc(l.context)}</div>` : ''}
+          <div class="lesson-conf-wrapper">
+            <span class="conf-metric-tag">${l.confidence.toFixed(1)}</span>
+            <div class="conf-track-bar">
+              <div class="conf-fill-bar" style="width:${confPercent}%"></div>
+            </div>
+            <span style="font-size:12px;color:var(--body-muted)">confidence level</span>
+          </div>
+          <div class="tile-footer-row">
+            ${(l.tags || '').split(',').filter(Boolean).map(t => `<span class="pill-label">${esc(t.trim())}</span>`).join('')}
+            <div class="card-actions-wrap">
+              <button class="btn-circle-utility" title="Delete lesson" onclick="deleteLesson(${l.id})">
+                <i class="fa-solid fa-trash-can"></i>
+              </button>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteLesson(id) {
+    if (!confirm('Delete this lesson permanently?')) return;
+    try {
+      await api(`/agentmemory/lessons/${id}`, { method: 'DELETE' });
+      showToast('Lesson deleted', 'success');
+      q(`les-${id}`)?.remove();
+      await updateStats();
+    } catch (e) {
+      showToast('Delete failed: ' + e.message, 'error');
+    }
+  }
+
+  // ─── Render: Memory Slots ─────────────────────────────────────────────
+  function renderSlots(items) {
+    if (!items.length) {
+      return `<div class="empty-state-card"><i class="fa-solid fa-database"></i><p>No memory slots configured.</p></div>`;
+    }
+    const cards = items.map(s => `
+      <div class="card-tile" id="slot-${esc(s.label)}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div class="slot-title-text">
+            ${s.pinned ? '<i class="fa-solid fa-thumbtack" style="color:var(--primary)"></i>' : ''}
+            ${esc(s.label)}
+          </div>
+          <button class="btn-circle-utility" title="Delete slot" onclick="deleteSlotUI('${esc(s.label)}')">
+            <i class="fa-solid fa-trash-can"></i>
+          </button>
+        </div>
+        ${s.description ? `<div class="slot-desc-text">${esc(s.description)}</div>` : ''}
+        <textarea class="slot-editor-textarea" id="slot-editor-${esc(s.label)}" rows="4">${esc(s.content || '')}</textarea>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+          <span style="font-size:12px;color:var(--body-muted)">${fmtAgo(s.updated_at)} · scope: ${(s.scope || 'global')}</span>
+          <button class="btn-pill-utility" onclick="saveSlot('${esc(s.label)}')">
+            <i class="fa-solid fa-floppy-disk" style="color:var(--primary)"></i> Save
+          </button>
+        </div>
+      </div>`).join('');
+    return `<div class="slots-layout-grid">${cards}</div>`;
+  }
+
+  async function saveSlot(label) {
+    const ta = q(`slot-editor-${label}`);
+    if (!ta) return;
+    try {
+      await api('/agentmemory/slot/replace', { method: 'POST', body: JSON.stringify({ label, content: ta.value }) });
+      showToast(`Slot "${label}" successfully saved ✓`, 'success');
+    } catch (e) {
+      showToast('Save failed: ' + e.message, 'error');
+    }
+  }
+
+  async function deleteSlotUI(label) {
+    if (!confirm(`Permanently delete memory slot "${label}"?`)) return;
+    try {
+      await api(`/agentmemory/slot/${encodeURIComponent(label)}`, { method: 'DELETE' });
+      showToast(`Slot "${label}" deleted`, 'success');
+      q(`slot-${label}`)?.remove();
+      await updateStats();
+    } catch (e) {
+      showToast('Delete failed: ' + e.message, 'error');
+    }
+  }
+
+  // ─── Core Data Loader ────────────────────────────────────────────────
+  async function loadData() {
+    const container = q('cardBody');
+    const search = q('searchInput').value.trim();
+    const project = selectedProject;
+
+    // Show skeletons on first tab switch
+    if (container.children.length === 0 || container.querySelector('.skeleton-bar')) {
+      container.innerHTML = `<div class="skeleton-bar"></div><div class="skeleton-bar" style="height:70px;animation-delay:0.1s"></div>`;
+    }
+
+    try {
+      let html = '';
+
+      if (currentTab === 'memories') {
+        let items;
+        if (search) {
+          items = await api('/agentmemory/smart-search', { method: 'POST', body: JSON.stringify({ query: search, limit: 50, project }) });
+        } else {
+          const qs = project ? `?project=${encodeURIComponent(project)}&limit=80` : '?limit=80';
+          items = await api(`/agentmemory/memories${qs}`);
+        }
+        html = (showNewForm ? renderNewForm() : '') + renderMemories(items);
+      }
+
+      else if (currentTab === 'observations') {
+        const qs = project ? `?project=${encodeURIComponent(project)}&limit=100` : '?limit=100';
+        let items = await api(`/agentmemory/observations${qs}`);
+        if (search) {
+          const sq = search.toLowerCase();
+          items = items.filter(o => o.content?.toLowerCase().includes(sq));
+        }
+        html = renderObservations(items);
+      }
+
+      else if (currentTab === 'sessions') {
+        const items = await api('/agentmemory/sessions');
+        html = renderSessions(items);
+      }
+
+      else if (currentTab === 'lessons') {
+        let items;
+        if (search) {
+          items = await api('/agentmemory/lessons/search', { method: 'POST', body: JSON.stringify({ query: search, project, limit: 50 }) });
+        } else {
+          items = await api('/agentmemory/lessons');
+          if (project) items = items.filter(l => l.project === project);
+        }
+        html = renderLessons(items);
+      }
+
+      else if (currentTab === 'slots') {
+        const items = await api('/agentmemory/slots');
+        html = renderSlots(items);
+      }
+
+      container.innerHTML = html;
+    } catch (e) {
+      container.innerHTML = `<div class="empty-state-card"><i class="fa-solid fa-circle-exclamation" style="color:var(--danger)"></i><p>Failed to load data: ${esc(e.message)}</p></div>`;
+    }
+  }
+
+  // ─── Export Functionality ────────────────────────────────────────────
+  async function exportDB() {
+    try {
+      const data = await api('/agentmemory/export');
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `memcore-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Export downloaded ✓', 'success');
+    } catch (e) {
+      showToast('Export failed: ' + e.message, 'error');
+    }
+  }
+
+  // ─── Consolidation Functionality ─────────────────────────────────────
+  async function consolidateDB() {
+    if (!confirm('Run database decay & consolidation? This prunes unused observations and reduces strength scores.')) return;
+    try {
+      const res = await api('/agentmemory/consolidate', { method: 'POST' });
+      const { stats } = res;
+      showToast(`Consolidated: decayed ${stats.memories_decayed} memories, pruned ${stats.memories_pruned} ✓`, 'success');
+      await Promise.all([updateStats(), loadData()]);
+    } catch (e) {
+      showToast('Consolidation failed: ' + e.message, 'error');
+    }
+  }
+
+  q('btnConsolidate').onclick = consolidateDB;
+  q('btnExport').onclick = exportDB;
+
+  // ─── Initialization ──────────────────────────────────────────────────
+  async function init() {
+    await checkStatus();
+    await Promise.all([updateStats(), loadProjects()]);
+    await loadData();
+  }
+
+  // ─── Polling Task ────────────────────────────────────────────────────
+  setInterval(async () => {
+    await checkStatus();
+    await updateStats();
+    await loadProjects();
+
+    const active = document.activeElement;
+    const isEditing = active && (active.id === 'searchInput' || active.tagName === 'TEXTAREA' || active.id === 'newContent');
+
+    if (currentTab === 'slots' && active?.tagName === 'TEXTAREA') return;
+    if (isEditing) return;
+
+    await loadData();
+  }, POLL_INTERVAL_MS);
+
+  init();
+</script>
+</body>
+</html>

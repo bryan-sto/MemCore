@@ -1,0 +1,47 @@
+{
+  "_comment": "MemCore Auto-Capture Hook Configuration",
+  "_instructions": [
+    "For Claude Code: merge the 'hooks' block below into your ~/.claude/settings.json",
+    "For Codex CLI: merge into ~/.codex/settings.json",
+    "For agy: place this file next to gemini-extension.json and reference it"
+  ],
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|multi_replace_file_content|replace_file_content|run_command|invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\Personal Project\\am\\hooks\\auto-capture.js\"",
+            "env": { "MEMCORE_EVENT": "PostToolUse" }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\Personal Project\\am\\hooks\\auto-capture.js\"",
+            "env": { "MEMCORE_EVENT": "SessionEnd" }
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\Personal Project\\am\\hooks\\auto-capture.js\"",
+            "env": { "MEMCORE_EVENT": "SessionStart" }
+          }
+        ]
+      }
+    ]
+  }
+}
