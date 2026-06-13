@@ -108,3 +108,21 @@ memory_slot_create/get/replace/list/delete — persistent named variables
 memory_diagnose           — health check + row counts
 memory_export             — full JSON snapshot of the DB
 ```
+
+---
+
+## ENVIRONMENT & PROJECT CONVENTIONS
+
+- **Service Ports**:
+  - `3111`: Default port for the global `agentmemory` MCP server extension (located at `C:\Users\acer\.gemini\extensions\agentmemory`).
+  - `3112`: Local workspace testing port (start via `$env:MEMCORE_PORT=3112; node index.js` when port `3111` is bound).
+- **Redesigned Dashboard**:
+  - The dashboard (`viewer.html`) follows the flat, photography-first Apple Design System.
+  - On `file://` loads, the API url defaults to port `3111` but can be dynamically overridden using `viewer.html?port=3112`.
+- **GSD Core Integration**:
+  - GSD Core is installed globally for the Antigravity runtime at `C:\Users\acer\.gemini\antigravity-cli`. 
+  - When starting a task, synchronize `ACTIVE_GOALS` memory slots with the current phase in `STATE.md`.
+- **Git Repository**:
+  - Tracked at `https://github.com/bryan-sto/MemCore.git`.
+  - Always commit to feature branches (e.g. `feature/<description>`) and never directly to `main` or `master`.
+
