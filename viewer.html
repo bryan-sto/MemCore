@@ -1278,6 +1278,7 @@
         ? `<div class="score-badge-group">
              <span class="score-badge" title="Combined retrieval score">score: ${m.score.toFixed(3)}</span>
              <span class="score-badge" title="Cosine Vector similarity">cosine: ${m._cosine !== undefined ? m._cosine.toFixed(3) : '0.000'}</span>
+             ${m._recency !== undefined ? `<span class="score-badge" title="Recency decay factor">recency: ${m._recency.toFixed(3)}</span>` : ''}
            </div>`
         : (hasVector ? `<span class="score-badge" style="margin-left:auto;color:var(--primary)" title="Local vector embedding stored"><i class="fa-solid fa-circle-nodes"></i> embedded</span>` : '');
 

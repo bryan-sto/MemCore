@@ -488,7 +488,7 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0) {
   // Calculate BM25 ranking
   const bm25Scored = bm25Rank(results, tokens);
 
-  // Fuse with Cosine Similarity
+  // Fuse with Cosine Similarity + recency
   const fusedScored = bm25Scored.map(doc => {
     let vectorScore = 0;
     if (queryVec && doc.embedding) {
@@ -498,8 +498,17 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0) {
       } catch (_) {}
     }
     // Combined score: Cosine similarity is base semantic score, BM25 adds term frequency match boost
-    const finalScore = vectorScore + (doc._bm25 ? Math.min(1.0, doc._bm25 * 0.1) : 0);
-    return { ...doc, _cosine: vectorScore, score: finalScore };
+    const relevanceScore = vectorScore + (doc._bm25 ? Math.min(1.0, doc._bm25 * 0.1) : 0);
+
+    // Recency weight: slow half-life (~180 days), floored at 0.5 so old memories
+    // are deprioritized on ties but never fully buried — they're durable facts,
+    // not chat messages.
+    const ageMs = Date.now() - new Date(doc.timestamp).getTime();
+    const ageDays = ageMs / (1000 * 60 * 60 * 24);
+    const recencyWeight = isNaN(ageDays) ? 1 : (0.5 + 0.5 * Math.pow(0.5, ageDays / 180));
+
+    const finalScore = relevanceScore * recencyWeight;
+    return { ...doc, _cosine: vectorScore, _recency: recencyWeight, score: finalScore };
   });
 
   // Sort by final fused score
