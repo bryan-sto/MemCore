@@ -1052,6 +1052,8 @@
   let searchDebounceTimer = null;
   let showNewForm = false;
   let isOnline = false;
+  let lastDataJSON = '';
+  let lastProjectsJSON = '';
 
   // ─── DOM Helper Shortcuts ─────────────────────────────────────────────
   const q = id => document.getElementById(id);
@@ -1075,6 +1077,15 @@
     const h = Math.floor(m / 60);
     if (h < 24) return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
+  }
+
+  function updateTimeAgos() {
+    document.querySelectorAll('.time-ago').forEach(el => {
+      const ts = el.getAttribute('data-timestamp');
+      if (ts) {
+        el.textContent = fmtAgo(ts);
+      }
+    });
   }
 
   function showToast(msg, type = '') {
@@ -1139,7 +1150,12 @@
     try {
       const sessions = await api('/agentmemory/sessions');
       const projects = [...new Set(sessions.map(s => s.project).filter(Boolean))];
+      const projectsJSON = JSON.stringify(projects);
       const sel = q('projectFilter');
+      if (lastProjectsJSON === projectsJSON && sel.children.length === projects.length + 1) {
+        return;
+      }
+      lastProjectsJSON = projectsJSON;
       const cur = sel.value;
       const opts = [
         '<option value="">All Projects</option>',
@@ -1153,6 +1169,7 @@
   function switchTab(tab, el) {
     currentTab = tab;
     showNewForm = false;
+    lastDataJSON = '';
     q('searchInput').value = '';
     document.querySelectorAll('.nav-tab-chip').forEach(n => n.classList.remove('active'));
     el.classList.add('active');
@@ -1172,18 +1189,23 @@
 
   function onProjectChange() {
     selectedProject = q('projectFilter').value;
+    lastDataJSON = '';
     loadData();
   }
 
   // Debounced input helper
   function debounceSearch() {
     clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(loadData, 280);
+    searchDebounceTimer = setTimeout(() => {
+      lastDataJSON = '';
+      loadData();
+    }, 280);
   }
 
   // ─── Toggle Forms ─────────────────────────────────────────────────────
   function toggleNewForm() {
     showNewForm = !showNewForm;
+    lastDataJSON = '';
     loadData();
     if (showNewForm) {
       setTimeout(() => q('newContent') && q('newContent').focus(), 50);
@@ -1192,6 +1214,7 @@
 
   function cancelNewForm() {
     showNewForm = false;
+    lastDataJSON = '';
     loadData();
   }
 
@@ -1259,6 +1282,7 @@
       });
       showToast('Memory successfully saved ✓', 'success');
       showNewForm = false;
+      lastDataJSON = '';
       await loadData();
       await updateStats();
     } catch (e) {
@@ -1291,7 +1315,7 @@
               <i class="fa-solid fa-wave-square" style="margin-right:2px"></i> ${((m.confidence ?? 1.0) * 100).toFixed(0)}%
             </span>
             <span>${fmtDate(m.timestamp)}</span>
-            <span style="opacity:0.6">${fmtAgo(m.timestamp)}</span>
+            <span class="time-ago" data-timestamp="${esc(m.timestamp)}" style="opacity:0.6">${fmtAgo(m.timestamp)}</span>
             <span class="tag-chip uuid" title="Session: ${esc(m.session_id)}">session: ${esc((m.session_id || '').slice(0, 8))}…</span>
             ${scoreRow}
           </div>
@@ -1315,6 +1339,7 @@
       await api(`/agentmemory/memories/${id}`, { method: 'DELETE' });
       showToast('Memory successfully deleted', 'success');
       q(`mem-${id}`)?.remove();
+      lastDataJSON = '';
       await updateStats();
     } catch (e) {
       showToast('Delete failed: ' + e.message, 'error');
@@ -1331,7 +1356,7 @@
         <div class="tile-meta-row">
           <span class="tag-chip type">${esc(o.type || 'observation')}</span>
           <span>${fmtDate(o.timestamp)}</span>
-          <span style="opacity:0.6">${fmtAgo(o.timestamp)}</span>
+          <span class="time-ago" data-timestamp="${esc(o.timestamp)}" style="opacity:0.6">${fmtAgo(o.timestamp)}</span>
           <span class="tag-chip uuid" title="Session: ${esc(o.session_id)}">session: ${esc((o.session_id || '').slice(0, 8))}…</span>
         </div>
         <div class="tile-content">${esc(o.content)}</div>
@@ -1353,7 +1378,7 @@
           </div>
           <div class="timeline-node-meta">
             <span><i class="fa-solid fa-clock"></i> started ${fmtDate(s.started_at)}</span>
-            ${s.ended_at ? `<span>ended ${fmtAgo(s.ended_at)}</span>` : `<span>running for ${fmtAgo(s.started_at)}</span>`}
+            ${s.ended_at ? `<span>ended <span class="time-ago" data-timestamp="${esc(s.ended_at)}">${fmtAgo(s.ended_at)}</span></span>` : `<span>running for <span class="time-ago" data-timestamp="${esc(s.started_at)}">${fmtAgo(s.started_at)}</span></span>`}
             <span style="font-family:var(--font-mono)">id: ${esc(s.id.slice(0, 16))}…</span>
             <span><i class="fa-solid fa-folder-open"></i> ${esc(s.cwd)}</span>
           </div>
@@ -1402,6 +1427,7 @@
       await api(`/agentmemory/lessons/${id}`, { method: 'DELETE' });
       showToast('Lesson deleted', 'success');
       q(`les-${id}`)?.remove();
+      lastDataJSON = '';
       await updateStats();
     } catch (e) {
       showToast('Delete failed: ' + e.message, 'error');
@@ -1427,7 +1453,7 @@
         ${s.description ? `<div class="slot-desc-text">${esc(s.description)}</div>` : ''}
         <textarea class="slot-editor-textarea" id="slot-editor-${esc(s.label)}" rows="4">${esc(s.content || '')}</textarea>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
-          <span style="font-size:12px;color:var(--body-muted)">${fmtAgo(s.updated_at)} · scope: ${(s.scope || 'global')}</span>
+          <span style="font-size:12px;color:var(--body-muted)"><span class="time-ago" data-timestamp="${esc(s.updated_at)}">${fmtAgo(s.updated_at)}</span> · scope: ${(s.scope || 'global')}</span>
           <button class="btn-pill-utility" onclick="saveSlot('${esc(s.label)}')">
             <i class="fa-solid fa-floppy-disk" style="color:var(--primary)"></i> Save
           </button>
@@ -1442,6 +1468,7 @@
     try {
       await api('/agentmemory/slot/replace', { method: 'POST', body: JSON.stringify({ label, content: ta.value }) });
       showToast(`Slot "${label}" successfully saved ✓`, 'success');
+      lastDataJSON = '';
     } catch (e) {
       showToast('Save failed: ' + e.message, 'error');
     }
@@ -1453,6 +1480,7 @@
       await api(`/agentmemory/slot/${encodeURIComponent(label)}`, { method: 'DELETE' });
       showToast(`Slot "${label}" deleted`, 'success');
       q(`slot-${label}`)?.remove();
+      lastDataJSON = '';
       await updateStats();
     } catch (e) {
       showToast('Delete failed: ' + e.message, 'error');
@@ -1468,55 +1496,88 @@
     // Show skeletons on first tab switch
     if (container.children.length === 0 || container.querySelector('.skeleton-bar')) {
       container.innerHTML = `<div class="skeleton-bar"></div><div class="skeleton-bar" style="height:70px;animation-delay:0.1s"></div>`;
+      lastDataJSON = '';
     }
 
     try {
       let html = '';
+      let items;
+      let dataJSON = '';
 
       if (currentTab === 'memories') {
-        let items;
         if (search) {
           items = await api('/agentmemory/smart-search', { method: 'POST', body: JSON.stringify({ query: search, limit: 50, project }) });
         } else {
           const qs = project ? `?project=${encodeURIComponent(project)}&limit=80` : '?limit=80';
           items = await api(`/agentmemory/memories${qs}`);
         }
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          updateTimeAgos();
+          return;
+        }
+        lastDataJSON = dataJSON;
         html = (showNewForm ? renderNewForm() : '') + renderMemories(items);
       }
 
       else if (currentTab === 'observations') {
         const qs = project ? `?project=${encodeURIComponent(project)}&limit=100` : '?limit=100';
-        let items = await api(`/agentmemory/observations${qs}`);
+        items = await api(`/agentmemory/observations${qs}`);
         if (search) {
           const sq = search.toLowerCase();
           items = items.filter(o => o.content?.toLowerCase().includes(sq));
         }
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          updateTimeAgos();
+          return;
+        }
+        lastDataJSON = dataJSON;
         html = renderObservations(items);
       }
 
       else if (currentTab === 'sessions') {
-        const items = await api('/agentmemory/sessions');
+        items = await api('/agentmemory/sessions');
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          updateTimeAgos();
+          return;
+        }
+        lastDataJSON = dataJSON;
         html = renderSessions(items);
       }
 
       else if (currentTab === 'lessons') {
-        let items;
         if (search) {
           items = await api('/agentmemory/lessons/search', { method: 'POST', body: JSON.stringify({ query: search, project, limit: 50 }) });
         } else {
           items = await api('/agentmemory/lessons');
           if (project) items = items.filter(l => l.project === project);
         }
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          updateTimeAgos();
+          return;
+        }
+        lastDataJSON = dataJSON;
         html = renderLessons(items);
       }
 
       else if (currentTab === 'slots') {
-        const items = await api('/agentmemory/slots');
+        items = await api('/agentmemory/slots');
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          updateTimeAgos();
+          return;
+        }
+        lastDataJSON = dataJSON;
         html = renderSlots(items);
       }
 
       container.innerHTML = html;
+      updateTimeAgos();
     } catch (e) {
+      lastDataJSON = '';
       container.innerHTML = `<div class="empty-state-card"><i class="fa-solid fa-circle-exclamation" style="color:var(--danger)"></i><p>Failed to load data: ${esc(e.message)}</p></div>`;
     }
   }
@@ -1545,6 +1606,7 @@
       const res = await api('/agentmemory/consolidate', { method: 'POST' });
       const { stats } = res;
       showToast(`Consolidated: decayed ${stats.memories_decayed} memories, pruned ${stats.memories_pruned} ✓`, 'success');
+      lastDataJSON = '';
       await Promise.all([updateStats(), loadData()]);
     } catch (e) {
       showToast('Consolidation failed: ' + e.message, 'error');
@@ -1568,9 +1630,10 @@
     await loadProjects();
 
     const active = document.activeElement;
-    const isEditing = active && (active.id === 'searchInput' || active.tagName === 'TEXTAREA' || active.id === 'newContent');
+    const isEditing = active && (active.id === 'searchInput' || active.tagName === 'TEXTAREA' || active.id === 'newContent' || active.classList.contains('field-input') || active.classList.contains('field-select'));
 
     if (currentTab === 'slots' && active?.tagName === 'TEXTAREA') return;
+    if (showNewForm) return;
     if (isEditing) return;
 
     await loadData();
