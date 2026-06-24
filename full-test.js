@@ -159,7 +159,7 @@ async function testRunner() {
   await post('/remember', { content: 'FTS5 full-text search uses inverted index for fast lookups.', concepts: 'fts,fts5,search,index,sqlite', project: 'test-v3', type: 'arch' });
 
   // Check concept edges were built
-  const edges = await get('/concepts?limit=20');
+  const edges = await get('/concepts?project=test-v3&limit=20');
   const hasFtsSearch = edges.some(e =>
     (e.concept_a === 'fts' && e.concept_b === 'search') ||
     (e.concept_a === 'search' && e.concept_b === 'fts')

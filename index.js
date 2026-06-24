@@ -170,6 +170,22 @@ try {
     CREATE INDEX IF NOT EXISTS idx_edges_b ON concept_edges(concept_b, project);
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS command_logs (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp    TEXT NOT NULL,
+      project      TEXT NOT NULL,
+      command      TEXT NOT NULL,
+      input_t      INTEGER NOT NULL,
+      output_t     INTEGER NOT NULL,
+      saved_t      INTEGER NOT NULL,
+      pct          REAL NOT NULL,
+      exec_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cmd_timestamp ON command_logs(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_cmd_project ON command_logs(project);
+  `);
+
   // FTS5 virtual tables
   try {
     db.exec(`
@@ -192,22 +208,61 @@ let currentSessionId = crypto.randomUUID();
 const defaultProject = process.env.PROJECT_NAME || path.basename(process.cwd()) || 'default';
 const defaultCwd     = process.cwd();
 
-try {
-  // Close any sessions left open by previous ungraceful shutdowns (task-kill, power loss, etc.)
-  const orphanTs = new Date().toISOString();
-  const orphanResult = db.prepare(
-    "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL"
-  ).run(orphanTs);
-  if (orphanResult.changes > 0) {
-    console.error(`[MemCore] Closed ${orphanResult.changes} orphaned session(s) from previous run(s).`);
-  }
+function resolveSessionId(sid) {
+  if (sid) return sid;
+  try {
+    const row = db.prepare('SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get();
+    if (row) return row.id;
+  } catch (_) {}
+  return currentSessionId;
+}
 
-  db.prepare(
-    'INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)'
-  ).run(currentSessionId, defaultProject, defaultCwd, new Date().toISOString());
-  console.error(`[MemCore] Session started: ${currentSessionId} (project: ${defaultProject})`);
-} catch (e) {
-  console.error('[MemCore] Error inserting startup session:', e.message);
+function bootstrapRESTSession() {
+  try {
+    const orphanTs = new Date().toISOString();
+    const orphanResult = db.prepare(
+      "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL"
+    ).run(orphanTs);
+    if (orphanResult.changes > 0) {
+      console.error(`[MemCore] Closed ${orphanResult.changes} orphaned session(s) from previous run(s).`);
+    }
+
+    const newId = crypto.randomUUID();
+    const ts = new Date().toISOString();
+    db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(
+      newId,
+      defaultProject,
+      defaultCwd,
+      ts
+    );
+    currentSessionId = newId;
+    console.error(`[MemCore] REST started session: ${currentSessionId} (project: ${defaultProject})`);
+  } catch (e) {
+    console.error('[MemCore] Error bootstrapping REST session:', e.message);
+  }
+}
+
+function bootstrapMCPSession() {
+  try {
+    const row = db.prepare('SELECT id, project FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get();
+    if (row) {
+      currentSessionId = row.id;
+      console.error(`[MemCore] MCP connected to active session: ${currentSessionId} (project: ${row.project})`);
+    } else {
+      const newId = crypto.randomUUID();
+      const ts = new Date().toISOString();
+      db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(
+        newId,
+        defaultProject,
+        defaultCwd,
+        ts
+      );
+      currentSessionId = newId;
+      console.error(`[MemCore] MCP started new session: ${currentSessionId} (project: ${defaultProject})`);
+    }
+  } catch (e) {
+    console.error('[MemCore] Error bootstrapping MCP session:', e.message);
+  }
 }
 
 // ─── 5. Search Utilities: tokenise + BM25 + concept-graph expansion ───────────
@@ -219,7 +274,14 @@ async function getEmbedding(text) {
   if (!text) return null;
   try {
     if (!pipelineInstance) {
-      const { pipeline, env } = require('@xenova/transformers');
+      let transformers;
+      try {
+        transformers = require('@xenova/transformers');
+      } catch (e) {
+        const fallbackPath = path.join(MEMCORE_DIR, 'node_modules', '@xenova', 'transformers');
+        transformers = require(fallbackPath);
+      }
+      const { pipeline, env } = transformers;
       env.cacheDir = path.join(MEMCORE_DIR, '.cache');
       pipelineInstance = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
     }
@@ -370,6 +432,7 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   const normConcepts = Array.isArray(concepts) ? concepts.join(',') : (concepts || '');
   const normFiles    = Array.isArray(files)    ? files.join(',')    : (files    || '');
   const normProject  = project || defaultProject;
+  const sid          = resolveSessionId();
 
   console.error(`[DB CREATE] saveMemory id=${id} type=${type} project=${normProject} concepts="${normConcepts}" content="${content.slice(0, 60)}"`);
 
@@ -379,7 +442,7 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
 
   db.prepare(
     'INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?)'
-  ).run(id, currentSessionId, content, type, normConcepts, normFiles, normProject, ts, embeddingStr);
+  ).run(id, sid, content, type, normConcepts, normFiles, normProject, ts, embeddingStr);
 
   try {
     db.prepare(
@@ -389,12 +452,12 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
 
   db.prepare(
     'INSERT INTO observations (session_id, type, content, timestamp) VALUES (?, ?, ?, ?)'
-  ).run(currentSessionId, type, content, ts);
+  ).run(sid, type, content, ts);
 
   // Index concept relationships for graph expansion
   indexConceptEdges(normConcepts, normProject);
 
-  return { id, session_id: currentSessionId, content, type, concepts: normConcepts, files: normFiles, project: normProject, timestamp: ts, confidence: 1.0, embedding };
+  return { id, session_id: sid, content, type, concepts: normConcepts, files: normFiles, project: normProject, timestamp: ts, confidence: 1.0, embedding };
 }
 
 /** Delete a memory by ID. */
@@ -678,7 +741,7 @@ function deleteSlot(label) {
  * @returns {object|null} The saved summary memory, or null if no memories exist.
  */
 async function summarizeSession(sessionId) {
-  const sid = sessionId || currentSessionId;
+  const sid = resolveSessionId(sessionId);
   console.error(`[AUTO-SUMMARIZE] Summarizing session ${sid}`);
 
   const memories = db.prepare(
@@ -792,6 +855,9 @@ async function processHookEvent(event, data = {}) {
       const { project = defaultProject, cwd = defaultCwd } = data;
       const newId = crypto.randomUUID();
       const ts    = new Date().toISOString();
+      try {
+        db.prepare('UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL').run(ts);
+      } catch (_) {}
       db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(newId, project, cwd, ts);
       currentSessionId = newId;
       console.error(`[HOOK] New session: ${newId} (${project})`);
@@ -800,9 +866,10 @@ async function processHookEvent(event, data = {}) {
 
     case 'SessionEnd': {
       const ts = new Date().toISOString();
-      db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(ts, currentSessionId);
-      const summary = await summarizeSession(currentSessionId);
-      return { status: 'ended', sessionId: currentSessionId, summary_id: summary?.id || null };
+      const sid = resolveSessionId();
+      db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(ts, sid);
+      const summary = await summarizeSession(sid);
+      return { status: 'ended', sessionId: sid, summary_id: summary?.id || null };
     }
 
     case 'Manual': {
@@ -934,7 +1001,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // GET /agentmemory/diagnostics | /stats
   if (pathName === '/agentmemory/diagnostics' || pathName === '/agentmemory/stats') {
     sendJson(200, {
-      active_session:    currentSessionId,
+      active_session:    resolveSessionId(),
       active_sessions:   db.prepare("SELECT count(*) as c FROM sessions WHERE ended_at IS NULL").get().c,
       total_sessions:    db.prepare('SELECT count(*) as c FROM sessions').get().c,
       sessions:          db.prepare('SELECT count(*) as c FROM sessions').get().c, // legacy fallback
@@ -993,6 +1060,9 @@ async function routeHttpRequest(url, method, body, sendJson) {
     const proj  = body.project || defaultProject;
     const cwd   = body.cwd    || defaultCwd;
     const ts    = new Date().toISOString();
+    try {
+      db.prepare('UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL').run(ts);
+    } catch (_) {}
     db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(newId, proj, cwd, ts);
     currentSessionId = newId;
     sendJson(201, { sessionId: newId, project: proj, cwd });
@@ -1002,9 +1072,10 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // POST /agentmemory/session/end
   if (pathName === '/agentmemory/session/end' && method === 'POST') {
     const ts = new Date().toISOString();
-    db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ts, currentSessionId);
-    const summary = body.summarize !== false ? await summarizeSession(currentSessionId) : null;
-    sendJson(200, { status: 'ended', sessionId: currentSessionId, summary_id: summary?.id || null });
+    const sid = resolveSessionId();
+    db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ts, sid);
+    const summary = body.summarize !== false ? await summarizeSession(sid) : null;
+    sendJson(200, { status: 'ended', sessionId: sid, summary_id: summary?.id || null });
     return;
   }
 
@@ -1020,7 +1091,8 @@ async function routeHttpRequest(url, method, body, sendJson) {
 
   // POST /agentmemory/session/summarize
   if (pathName === '/agentmemory/session/summarize' && method === 'POST') {
-    const summary = await summarizeSession(body.session_id || currentSessionId);
+    const sid = resolveSessionId(body.session_id);
+    const summary = await summarizeSession(sid);
     sendJson(summary ? 200 : 204, summary || { message: 'No memories to summarize' });
     return;
   }
@@ -1119,6 +1191,45 @@ async function routeHttpRequest(url, method, body, sendJson) {
     return;
   }
 
+  // POST /agentmemory/command/log
+  if (pathName === '/agentmemory/command/log' && method === 'POST') {
+    const { timestamp, project, command, input_t, output_t, saved_t, pct, exec_ms } = body;
+    if (!project || !command || input_t === undefined || output_t === undefined) {
+      sendJson(400, { error: 'Missing required command log fields' });
+      return;
+    }
+    const stmt = db.prepare(`
+      INSERT INTO command_logs (timestamp, project, command, input_t, output_t, saved_t, pct, exec_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(timestamp || new Date().toISOString(), project, command, input_t, output_t, saved_t, pct, exec_ms);
+    sendJson(201, { success: true });
+    return;
+  }
+
+  // GET /agentmemory/gain
+  if (pathName === '/agentmemory/gain' && method === 'GET') {
+    const totalRow = db.prepare(`
+      SELECT 
+        COUNT(*) as total_commands,
+        SUM(input_t) as total_input_t,
+        SUM(output_t) as total_output_t,
+        SUM(saved_t) as total_saved_t,
+        AVG(pct) as avg_pct
+      FROM command_logs
+    `).get();
+    
+    const stats = {
+      total_commands: totalRow.total_commands || 0,
+      total_input_t: totalRow.total_input_t || 0,
+      total_output_t: totalRow.total_output_t || 0,
+      total_saved_t: totalRow.total_saved_t || 0,
+      avg_pct: totalRow.avg_pct || 0.0
+    };
+    sendJson(200, stats);
+    return;
+  }
+
   sendJson(404, { error: `Endpoint '${pathName}' [${method}] not found in MemCore v${VERSION}` });
 }
 
@@ -1169,9 +1280,11 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.error(`[MemCore REST] http://localhost:${PORT}`);
+  bootstrapRESTSession();
 }).on('error', err => {
   if (err.code === 'EADDRINUSE') {
     console.error(`[MemCore] Port ${PORT} in use — MCP-only mode.`);
+    bootstrapMCPSession();
   } else {
     console.error('[MemCore] HTTP error:', err);
   }
@@ -1418,7 +1531,7 @@ async function executeMcpTool(name, args) {
       return {
         status:  'healthy',
         version: VERSION,
-        active_session: currentSessionId,
+        active_session: resolveSessionId(),
         stats: {
           active_sessions: db.prepare("SELECT count(*) as c FROM sessions WHERE ended_at IS NULL").get().c,
           total_sessions:  db.prepare('SELECT count(*) as c FROM sessions').get().c,
@@ -1442,7 +1555,8 @@ async function executeMcpTool(name, args) {
     case 'memory_export':
       return exportAll();
     case 'memory_session_summarize': {
-      const summary = await summarizeSession(args.session_id || currentSessionId);
+      const sid = resolveSessionId(args.session_id);
+      const summary = await summarizeSession(sid);
       return summary || { message: 'No memories to summarize for this session.' };
     }
     case 'memory_hook':
@@ -1502,10 +1616,11 @@ rl.on('line', async line => {
 async function shutdown(signal) {
   console.error(`[MemCore] ${signal} — auto-summarizing and closing.`);
   try {
+    const sid = resolveSessionId();
     // Auto-summarize the current session before closing
-    await summarizeSession(currentSessionId);
+    await summarizeSession(sid);
     db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL')
-      .run(new Date().toISOString(), currentSessionId);
+      .run(new Date().toISOString(), sid);
   } catch (_) {}
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (_) {}
   server.close();

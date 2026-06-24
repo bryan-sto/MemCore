@@ -965,6 +965,7 @@
       <button class="nav-tab-chip" data-tab="lessons" onclick="switchTab('lessons', this)">Lessons</button>
       <button class="nav-tab-chip" data-tab="slots" onclick="switchTab('slots', this)">Slots</button>
       <button class="nav-tab-chip" data-tab="observations" onclick="switchTab('observations', this)">Observations</button>
+      <button class="nav-tab-chip" data-tab="gain" onclick="switchTab('gain', this)">Token Savings</button>
     </div>
 
     <!-- Main Action Pill -->
@@ -1180,6 +1181,7 @@
       lessons: 'Lessons Learned',
       slots: 'Memory Slots',
       observations: 'Observations Ledger',
+      gain: 'Token Savings'
     }[tab] || tab;
 
     q('searchBarWrap').style.display = ['memories', 'lessons', 'observations'].includes(tab) ? '' : 'none';
@@ -1288,6 +1290,58 @@
     } catch (e) {
       showToast('Save failed: ' + e.message, 'error');
     }
+  }
+
+  function renderGain(stats) {
+    const totalCommands = stats.total_commands || 0;
+    const totalInput = stats.total_input_t || 0;
+    const totalOutput = stats.total_output_t || 0;
+    const totalSaved = stats.total_saved_t || 0;
+    const avgPct = stats.avg_pct || 0.0;
+
+    return `
+      <div style="display: flex; flex-direction: column; gap: var(--space-lg); max-width: 800px; margin: 0 auto; width: 100%; padding-top: var(--space-md);">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-md);">
+          <div class="card-tile" style="text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
+            <div style="font-size: 13px; text-transform: uppercase; color: var(--body-muted); letter-spacing: 0.5px; font-weight: 600;">Total Saved</div>
+            <div style="font-size: 32px; font-weight: 700; font-family: var(--font-mono); color: var(--primary-focus);">${totalSaved.toLocaleString()}</div>
+            <div style="font-size: 12px; color: var(--body-muted);">tokens</div>
+          </div>
+          <div class="card-tile" style="text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
+            <div style="font-size: 13px; text-transform: uppercase; color: var(--body-muted); letter-spacing: 0.5px; font-weight: 600;">Savings %</div>
+            <div style="font-size: 32px; font-weight: 700; font-family: var(--font-mono); color: var(--success);">${avgPct.toFixed(1)}%</div>
+            <div style="font-size: 12px; color: var(--body-muted);">avg efficiency</div>
+          </div>
+          <div class="card-tile" style="text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
+            <div style="font-size: 13px; text-transform: uppercase; color: var(--body-muted); letter-spacing: 0.5px; font-weight: 600;">Commands</div>
+            <div style="font-size: 32px; font-weight: 700; font-family: var(--font-mono); color: var(--ink);">${totalCommands.toLocaleString()}</div>
+            <div style="font-size: 12px; color: var(--body-muted);">processed</div>
+          </div>
+        </div>
+        
+        <div class="card-tile" style="padding: 24px; display: flex; flex-direction: column; gap: var(--space-md);">
+          <div style="font-size: 16px; font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--hairline); padding-bottom: var(--space-xs);">Token Breakdown</div>
+          <div style="display: flex; flex-direction: column; gap: var(--space-xs);">
+            <div style="display: flex; justify-content: space-between; font-size: 14px;">
+              <span style="color: var(--body-muted);">Uncompressed Input:</span>
+              <span style="font-family: var(--font-mono); font-weight: 600;">${totalInput.toLocaleString()} tokens</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 14px;">
+              <span style="color: var(--body-muted);">Compressed Output:</span>
+              <span style="font-family: var(--font-mono); font-weight: 600;">${totalOutput.toLocaleString()} tokens</span>
+            </div>
+            <div style="height: 8px; background: var(--canvas-parchment); border-radius: var(--rounded-pill); overflow: hidden; margin-top: 8px; display: flex;">
+              <div style="width: ${totalInput > 0 ? (totalOutput / totalInput * 100) : 0}%; background: var(--primary); height: 100%;"></div>
+              <div style="width: ${totalInput > 0 ? (totalSaved / totalInput * 100) : 100}%; background: var(--success); height: 100%;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--body-muted); margin-top: 4px;">
+              <span>Blue: Output (${totalInput > 0 ? (totalOutput / totalInput * 100).toFixed(0) : 0}%)</span>
+              <span>Green: Saved (${totalInput > 0 ? (totalSaved / totalInput * 100).toFixed(0) : 100}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   // ─── Render: Memories Cards ───────────────────────────────────────────
@@ -1572,6 +1626,16 @@
         }
         lastDataJSON = dataJSON;
         html = renderSlots(items);
+      }
+
+      else if (currentTab === 'gain') {
+        items = await api('/agentmemory/gain');
+        dataJSON = JSON.stringify(items);
+        if (lastDataJSON === dataJSON) {
+          return;
+        }
+        lastDataJSON = dataJSON;
+        html = renderGain(items);
       }
 
       container.innerHTML = html;
