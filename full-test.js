@@ -206,7 +206,7 @@ async function testRunner() {
   // ── 6. Session Summarize ────────────────────────────────────────────────────
   section('6. Auto-Summarize (Session Summary)');
 
-  const summary = await post('/session/summarize', {});
+  const summary = await post('/session/summarize', { project: 'test-v3' });
   if (summary.id && summary.content?.includes('session_summary')) {
     pass('Session summarized', `"${summary.content.slice(0, 100)}..."`);
   } else if (summary.message) {

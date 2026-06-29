@@ -213,9 +213,29 @@ function resolveSessionId(sid, project = '', cwd = '') {
   const targetProject = project || defaultProject;
   const targetCwd = cwd || defaultCwd;
   try {
-    const row = db.prepare('SELECT id FROM sessions WHERE project = ? AND cwd = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get(targetProject, targetCwd);
-    if (row) return row.id;
-  } catch (_) {}
+    // 1. Try matching project and cwd first (best match)
+    if (cwd) {
+      const row = db.prepare('SELECT id FROM sessions WHERE project = ? AND cwd = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get(targetProject, targetCwd);
+      if (row) return row.id;
+    }
+    // 2. Fall back to matching active session by project name only (for MCP/REST calls omitting cwd)
+    const rowProj = db.prepare('SELECT id FROM sessions WHERE project = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get(targetProject);
+    if (rowProj) return rowProj.id;
+
+    // 3. Lazy session initialization: create project-specific session if none exists to prevent cross-project fallback
+    const newId = crypto.randomUUID();
+    const ts = new Date().toISOString();
+    db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(
+      newId,
+      targetProject,
+      targetCwd,
+      ts
+    );
+    console.error(`[MemCore] Auto-started new session for project: ${targetProject} (id: ${newId})`);
+    return newId;
+  } catch (err) {
+    console.error('[MemCore] Error in resolveSessionId:', err.message);
+  }
   return currentSessionId;
 }
 
@@ -1208,7 +1228,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
   if (pathName === '/agentmemory/session/summarize' && method === 'POST') {
     const sid = resolveSessionId(body.session_id, body.project, body.cwd);
     const summary = await summarizeSession(sid);
-    sendJson(summary ? 200 : 204, summary || { message: 'No memories to summarize' });
+    sendJson(200, summary || { message: 'No memories to summarize' });
     return;
   }
 
