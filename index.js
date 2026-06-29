@@ -69,6 +69,7 @@ try {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA synchronous  = NORMAL;');
   db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 5000;');
   db.exec('PRAGMA auto_vacuum  = INCREMENTAL;');
   db.exec('PRAGMA cache_size   = -8000;'); // 8 MB page cache
 
@@ -1428,6 +1429,15 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.error(`[MemCore REST] http://localhost:${PORT}`);
   bootstrapRESTSession();
+
+  // Automate memory decay/consolidation in the background every 6 hours
+  setInterval(() => {
+    try {
+      consolidateDatabase();
+    } catch (err) {
+      console.error('[MemCore Auto-Consolidate Error]', err.message);
+    }
+  }, 6 * 60 * 60 * 1000).unref();
 }).on('error', err => {
   if (err.code === 'EADDRINUSE') {
     console.error(`[MemCore] Port ${PORT} in use — MCP-only mode.`);
