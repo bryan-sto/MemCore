@@ -208,10 +208,12 @@ let currentSessionId = crypto.randomUUID();
 const defaultProject = process.env.PROJECT_NAME || path.basename(process.cwd()) || 'default';
 const defaultCwd     = process.cwd();
 
-function resolveSessionId(sid) {
+function resolveSessionId(sid, project = '', cwd = '') {
   if (sid) return sid;
+  const targetProject = project || defaultProject;
+  const targetCwd = cwd || defaultCwd;
   try {
-    const row = db.prepare('SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get();
+    const row = db.prepare('SELECT id FROM sessions WHERE project = ? AND cwd = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get(targetProject, targetCwd);
     if (row) return row.id;
   } catch (_) {}
   return currentSessionId;
@@ -221,8 +223,8 @@ function bootstrapRESTSession() {
   try {
     const orphanTs = new Date().toISOString();
     const orphanResult = db.prepare(
-      "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL"
-    ).run(orphanTs);
+      "UPDATE sessions SET ended_at = ? WHERE project = ? AND cwd = ? AND ended_at IS NULL"
+    ).run(orphanTs, defaultProject, defaultCwd);
     if (orphanResult.changes > 0) {
       console.error(`[MemCore] Closed ${orphanResult.changes} orphaned session(s) from previous run(s).`);
     }
@@ -244,7 +246,7 @@ function bootstrapRESTSession() {
 
 function bootstrapMCPSession() {
   try {
-    const row = db.prepare('SELECT id, project FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get();
+    const row = db.prepare('SELECT id, project FROM sessions WHERE project = ? AND cwd = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').get(defaultProject, defaultCwd);
     if (row) {
       currentSessionId = row.id;
       console.error(`[MemCore] MCP connected to active session: ${currentSessionId} (project: ${row.project})`);
@@ -283,7 +285,12 @@ async function getEmbedding(text) {
       }
       const { pipeline, env } = transformers;
       env.cacheDir = path.join(MEMCORE_DIR, '.cache');
-      pipelineInstance = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      
+      // Enable Multi-Threading and SIMD for high-speed crash-free execution on Node v24+
+      env.backends.onnx.wasm.numThreads = 4;
+      env.backends.onnx.wasm.simd = true;
+      
+      pipelineInstance = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
     }
     const output = await pipelineInstance(text, { pooling: 'mean', normalize: true });
     return Array.from(output.data);
@@ -432,7 +439,7 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   const normConcepts = Array.isArray(concepts) ? concepts.join(',') : (concepts || '');
   const normFiles    = Array.isArray(files)    ? files.join(',')    : (files    || '');
   const normProject  = project || defaultProject;
-  const sid          = resolveSessionId();
+  const sid          = resolveSessionId(null, normProject);
 
   console.error(`[DB CREATE] saveMemory id=${id} type=${type} project=${normProject} concepts="${normConcepts}" content="${content.slice(0, 60)}"`);
 
@@ -856,7 +863,7 @@ async function processHookEvent(event, data = {}) {
       const newId = crypto.randomUUID();
       const ts    = new Date().toISOString();
       try {
-        db.prepare('UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL').run(ts);
+        db.prepare('UPDATE sessions SET ended_at = ? WHERE project = ? AND cwd = ? AND ended_at IS NULL').run(ts, project, cwd);
       } catch (_) {}
       db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(newId, project, cwd, ts);
       currentSessionId = newId;
@@ -866,7 +873,7 @@ async function processHookEvent(event, data = {}) {
 
     case 'SessionEnd': {
       const ts = new Date().toISOString();
-      const sid = resolveSessionId();
+      const sid = resolveSessionId(null, data.project, data.cwd);
       db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(ts, sid);
       const summary = await summarizeSession(sid);
       return { status: 'ended', sessionId: sid, summary_id: summary?.id || null };
@@ -894,7 +901,97 @@ function exportAll() {
     lessons:       db.prepare('SELECT * FROM lessons ORDER BY updated_at DESC').all(),
     slots:         db.prepare('SELECT * FROM slots ORDER BY label ASC').all(),
     concept_edges: db.prepare('SELECT * FROM concept_edges ORDER BY weight DESC LIMIT 500').all(),
+    command_logs:  db.prepare('SELECT * FROM command_logs ORDER BY timestamp DESC').all()
   };
+}
+
+/** Import full DB from a JSON snapshot inside an ACID transaction. */
+async function importAll(data) {
+  if (!data || typeof data !== 'object') throw new Error('Invalid backup data format.');
+  
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    db.exec('DELETE FROM sessions;');
+    db.exec('DELETE FROM memories;');
+    db.exec('DELETE FROM observations;');
+    db.exec('DELETE FROM lessons;');
+    db.exec('DELETE FROM slots;');
+    db.exec('DELETE FROM concept_edges;');
+    db.exec('DELETE FROM command_logs;');
+    
+    try {
+      db.exec('DELETE FROM memories_fts;');
+      db.exec('DELETE FROM lessons_fts;');
+      db.exec('DELETE FROM observations_fts;');
+    } catch (_) {}
+    
+    const insertSession = db.prepare('INSERT INTO sessions (id, project, cwd, started_at, ended_at) VALUES (?, ?, ?, ?, ?)');
+    const insertMemory = db.prepare('INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const insertObs = db.prepare('INSERT INTO observations (id, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)');
+    const insertLesson = db.prepare('INSERT INTO lessons (id, content, context, confidence, project, tags, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insertSlot = db.prepare('INSERT INTO slots (label, content, size_limit, description, pinned, scope, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insertEdge = db.prepare('INSERT INTO concept_edges (concept_a, concept_b, weight, project) VALUES (?, ?, ?, ?)');
+    const insertCmd = db.prepare('INSERT INTO command_logs (timestamp, project, command, input_t, output_t, saved_t, pct, exec_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+
+    if (Array.isArray(data.sessions)) {
+      for (const s of data.sessions) {
+        insertSession.run(s.id, s.project, s.cwd, s.started_at, s.ended_at);
+      }
+    }
+    
+    if (Array.isArray(data.memories)) {
+      for (const m of data.memories) {
+        insertMemory.run(m.id, m.session_id, m.content, m.type, m.concepts, m.files, m.project, m.timestamp, m.confidence ?? 1.0, m.embedding);
+        try {
+          db.prepare('INSERT INTO memories_fts (content, concepts, files, content_id) VALUES (?, ?, ?, ?)')
+            .run(m.content, m.concepts || '', m.files || '', m.id);
+        } catch (_) {}
+      }
+    }
+
+    if (Array.isArray(data.observations)) {
+      for (const o of data.observations) {
+        insertObs.run(o.id, o.session_id, o.type, o.content, o.timestamp);
+        try {
+          db.prepare('INSERT INTO observations_fts (content, content_id) VALUES (?, ?)')
+            .run(o.content, String(o.id));
+        } catch (_) {}
+      }
+    }
+
+    if (Array.isArray(data.lessons)) {
+      for (const l of data.lessons) {
+        insertLesson.run(l.id, l.content, l.context, l.confidence ?? 1.0, l.project, l.tags, l.updated_at);
+        try {
+          db.prepare('INSERT INTO lessons_fts (content, context, content_id) VALUES (?, ?, ?)')
+            .run(l.content, l.context || '', String(l.id));
+        } catch (_) {}
+      }
+    }
+
+    if (Array.isArray(data.slots)) {
+      for (const s of data.slots) {
+        insertSlot.run(s.label, s.content, s.size_limit ?? 1048576, s.description, s.pinned ?? 0, s.scope ?? 'global', s.updated_at);
+      }
+    }
+
+    if (Array.isArray(data.concept_edges)) {
+      for (const e of data.concept_edges) {
+        insertEdge.run(e.concept_a, e.concept_b, e.weight ?? 1, e.project || '');
+      }
+    }
+
+    if (Array.isArray(data.command_logs)) {
+      for (const c of data.command_logs) {
+        insertCmd.run(c.timestamp, c.project, c.command, c.input_t, c.output_t, c.saved_t, c.pct, c.exec_ms);
+      }
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
 }
 
 /**
@@ -913,76 +1010,82 @@ function exportAll() {
  */
 function consolidateDatabase() {
   console.error('[DB CONSOLIDATE] Starting consolidation and decay.');
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    // 1. Decay memories
+    const memories = db.prepare('SELECT id, type, confidence FROM memories').all();
+    let memoriesDecayed = 0;
+    let memoriesPruned = 0;
 
-  // 1. Decay memories
-  const memories = db.prepare('SELECT id, type, confidence FROM memories').all();
-  let memoriesDecayed = 0;
-  let memoriesPruned = 0;
+    for (const m of memories) {
+      const currentConf = m.confidence ?? 1.0;
+      let multiplier = 0.90; // default for observation
+      
+      if (m.type === 'hook_observation' || m.type === 'user_prompt') {
+        multiplier = 0.85;
+      } else if (m.type === 'env' || m.type === 'bug') {
+        multiplier = 0.95;
+      } else if (
+        m.type === 'arch' || 
+        m.type === 'decision' || 
+        m.type === 'convention' || 
+        m.type === 'session_summary'
+      ) {
+        multiplier = 0.98;
+      }
 
-  for (const m of memories) {
-    const currentConf = m.confidence ?? 1.0;
-    let multiplier = 0.90; // default for observation
-    
-    if (m.type === 'hook_observation' || m.type === 'user_prompt') {
-      multiplier = 0.85;
-    } else if (m.type === 'env' || m.type === 'bug') {
-      multiplier = 0.95;
-    } else if (
-      m.type === 'arch' || 
-      m.type === 'decision' || 
-      m.type === 'convention' || 
-      m.type === 'session_summary'
-    ) {
-      multiplier = 0.98;
+      const newConf = currentConf * multiplier;
+
+      if (newConf < 0.2) {
+        // Prune memory
+        db.prepare('DELETE FROM memories WHERE id = ?').run(m.id);
+        try { db.prepare('DELETE FROM memories_fts WHERE content_id = ?').run(m.id); } catch (_) {}
+        memoriesPruned++;
+      } else {
+        db.prepare('UPDATE memories SET confidence = ? WHERE id = ?').run(newConf, m.id);
+        memoriesDecayed++;
+      }
     }
 
-    const newConf = currentConf * multiplier;
+    // 2. Decay lessons
+    const lessons = db.prepare('SELECT id, confidence FROM lessons').all();
+    let lessonsDecayed = 0;
+    let lessonsPruned = 0;
 
-    if (newConf < 0.2) {
-      // Prune memory
-      db.prepare('DELETE FROM memories WHERE id = ?').run(m.id);
-      try { db.prepare('DELETE FROM memories_fts WHERE content_id = ?').run(m.id); } catch (_) {}
-      memoriesPruned++;
-    } else {
-      db.prepare('UPDATE memories SET confidence = ? WHERE id = ?').run(newConf, m.id);
-      memoriesDecayed++;
+    for (const l of lessons) {
+      const currentConf = l.confidence ?? 1.0;
+      const newConf = currentConf * 0.90; // lessons decay at 10% rate
+
+      if (newConf < 0.3) {
+        db.prepare('DELETE FROM lessons WHERE id = ?').run(l.id);
+        try { db.prepare('DELETE FROM lessons_fts WHERE content_id = ?').run(String(l.id)); } catch (_) {}
+        lessonsPruned++;
+      } else {
+        db.prepare('UPDATE lessons SET confidence = ? WHERE id = ?').run(newConf, l.id);
+        lessonsDecayed++;
+      }
     }
+
+    // 3. Compact database
+    db.exec('PRAGMA incremental_vacuum(100);');
+
+    db.exec('COMMIT;');
+    console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}.`);
+
+    return {
+      status: 'ok',
+      message: 'Consolidation and decay completed.',
+      stats: {
+        memories_decayed: memoriesDecayed,
+        memories_pruned: memoriesPruned,
+        lessons_decayed: lessonsDecayed,
+        lessons_pruned: lessonsPruned,
+      }
+    };
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
   }
-
-  // 2. Decay lessons
-  const lessons = db.prepare('SELECT id, confidence FROM lessons').all();
-  let lessonsDecayed = 0;
-  let lessonsPruned = 0;
-
-  for (const l of lessons) {
-    const currentConf = l.confidence ?? 1.0;
-    const newConf = currentConf * 0.90; // lessons decay at 10% rate
-
-    if (newConf < 0.3) {
-      db.prepare('DELETE FROM lessons WHERE id = ?').run(l.id);
-      try { db.prepare('DELETE FROM lessons_fts WHERE content_id = ?').run(String(l.id)); } catch (_) {}
-      lessonsPruned++;
-    } else {
-      db.prepare('UPDATE lessons SET confidence = ? WHERE id = ?').run(newConf, l.id);
-      lessonsDecayed++;
-    }
-  }
-
-  // 3. Compact database
-  db.exec('PRAGMA incremental_vacuum(100);');
-
-  console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}.`);
-
-  return {
-    status: 'ok',
-    message: 'Consolidation and decay completed.',
-    stats: {
-      memories_decayed: memoriesDecayed,
-      memories_pruned: memoriesPruned,
-      lessons_decayed: lessonsDecayed,
-      lessons_pruned: lessonsPruned,
-    }
-  };
 }
 
 // ─── 7. HTTP Router ────────────────────────────────────────────────────────────
@@ -1001,7 +1104,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // GET /agentmemory/diagnostics | /stats
   if (pathName === '/agentmemory/diagnostics' || pathName === '/agentmemory/stats') {
     sendJson(200, {
-      active_session:    resolveSessionId(),
+      active_session:    resolveSessionId(null, projectParam),
       active_sessions:   db.prepare("SELECT count(*) as c FROM sessions WHERE ended_at IS NULL").get().c,
       total_sessions:    db.prepare('SELECT count(*) as c FROM sessions').get().c,
       sessions:          db.prepare('SELECT count(*) as c FROM sessions').get().c, // legacy fallback
@@ -1017,6 +1120,18 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // GET /agentmemory/export
   if (pathName === '/agentmemory/export' && method === 'GET') {
     sendJson(200, exportAll());
+    return;
+  }
+
+  // POST /agentmemory/import
+  if (pathName === '/agentmemory/import' && method === 'POST') {
+    try {
+      await importAll(body);
+      sendJson(200, { success: true, message: 'Database imported successfully.' });
+    } catch (err) {
+      console.error('[MemCore Import Error]', err);
+      sendJson(500, { error: err.message });
+    }
     return;
   }
 
@@ -1061,7 +1176,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
     const cwd   = body.cwd    || defaultCwd;
     const ts    = new Date().toISOString();
     try {
-      db.prepare('UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL').run(ts);
+      db.prepare('UPDATE sessions SET ended_at = ? WHERE project = ? AND cwd = ? AND ended_at IS NULL').run(ts, proj, cwd);
     } catch (_) {}
     db.prepare('INSERT INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)').run(newId, proj, cwd, ts);
     currentSessionId = newId;
@@ -1072,7 +1187,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // POST /agentmemory/session/end
   if (pathName === '/agentmemory/session/end' && method === 'POST') {
     const ts = new Date().toISOString();
-    const sid = resolveSessionId();
+    const sid = resolveSessionId(body.session_id, body.project, body.cwd);
     db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ts, sid);
     const summary = body.summarize !== false ? await summarizeSession(sid) : null;
     sendJson(200, { status: 'ended', sessionId: sid, summary_id: summary?.id || null });
@@ -1091,7 +1206,7 @@ async function routeHttpRequest(url, method, body, sendJson) {
 
   // POST /agentmemory/session/summarize
   if (pathName === '/agentmemory/session/summarize' && method === 'POST') {
-    const sid = resolveSessionId(body.session_id);
+    const sid = resolveSessionId(body.session_id, body.project, body.cwd);
     const summary = await summarizeSession(sid);
     sendJson(summary ? 200 : 204, summary || { message: 'No memories to summarize' });
     return;
@@ -1219,14 +1334,26 @@ async function routeHttpRequest(url, method, body, sendJson) {
       FROM command_logs
     `).get();
     
+    const recentLogs = db.prepare(`
+      SELECT * FROM command_logs ORDER BY timestamp DESC LIMIT 50
+    `).all();
+    
     const stats = {
       total_commands: totalRow.total_commands || 0,
       total_input_t: totalRow.total_input_t || 0,
       total_output_t: totalRow.total_output_t || 0,
       total_saved_t: totalRow.total_saved_t || 0,
-      avg_pct: totalRow.avg_pct || 0.0
+      avg_pct: totalRow.avg_pct || 0.0,
+      recent_logs: recentLogs
     };
     sendJson(200, stats);
+    return;
+  }
+
+  // DELETE /agentmemory/command/logs
+  if (pathName === '/agentmemory/command/logs' && method === 'DELETE') {
+    db.prepare('DELETE FROM command_logs').run();
+    sendJson(200, { success: true });
     return;
   }
 
@@ -1531,7 +1658,7 @@ async function executeMcpTool(name, args) {
       return {
         status:  'healthy',
         version: VERSION,
-        active_session: resolveSessionId(),
+        active_session: resolveSessionId(null, args.project),
         stats: {
           active_sessions: db.prepare("SELECT count(*) as c FROM sessions WHERE ended_at IS NULL").get().c,
           total_sessions:  db.prepare('SELECT count(*) as c FROM sessions').get().c,
@@ -1555,7 +1682,7 @@ async function executeMcpTool(name, args) {
     case 'memory_export':
       return exportAll();
     case 'memory_session_summarize': {
-      const sid = resolveSessionId(args.session_id);
+      const sid = resolveSessionId(args.session_id, args.project);
       const summary = await summarizeSession(sid);
       return summary || { message: 'No memories to summarize for this session.' };
     }
