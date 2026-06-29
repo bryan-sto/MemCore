@@ -243,8 +243,8 @@ function bootstrapRESTSession() {
   try {
     const orphanTs = new Date().toISOString();
     const orphanResult = db.prepare(
-      "UPDATE sessions SET ended_at = ? WHERE project = ? AND cwd = ? AND ended_at IS NULL"
-    ).run(orphanTs, defaultProject, defaultCwd);
+      "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL"
+    ).run(orphanTs);
     if (orphanResult.changes > 0) {
       console.error(`[MemCore] Closed ${orphanResult.changes} orphaned session(s) from previous run(s).`);
     }
