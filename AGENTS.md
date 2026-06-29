@@ -13,21 +13,22 @@ MemCore is running as an MCP server. Follow these rules every session without ex
 3. If no results exist, proceed normally.
 ```
 
----
-
 ## DURING THE SESSION (automatic saves — zero user prompting required)
 
 Save to memory immediately when ANY of the following occur:
 
-| Trigger | Tool to call | Type |
+| Trigger | Tool to call | Type / Details |
 |---|---|---|
 | A file is created or significantly changed | `memory_save` | `arch` or `convention` |
 | A bug root cause is identified | `memory_save` | `bug` |
 | User confirms a design decision | `memory_save` | `decision` |
 | A non-obvious workaround is discovered | `memory_save` | `convention` |
 | An error is solved after 2+ attempts | `memory_save` | `bug` |
+| A complex bug/logic error is resolved after 2+ attempts | `memory_lesson_save` | (Record the code lesson learned) |
+| The user explicitly corrects a coding or API usage mistake | `memory_lesson_save` | (Record correct usage / best practice) |
 | A new package/library is added | `memory_save` | `env` |
 | The user says "remember this" | `memory_save` | (match what they said) |
+| The user says "remember this lesson" or triggers `/learn` | `memory_lesson_save` | (Record the lesson) |
 
 **Concept tags rule:** Always populate `concepts` with 3–8 comma-separated keywords describing
 the memory topic (e.g. `sqlite,fts5,search,performance`). This feeds the concept graph and makes
