@@ -70,3 +70,4 @@ MemCore is registered directly in the agent's MCP settings at `C:\Users\acer\.ge
   ]
 }
 ```
+# This tool is created to explore how mcp works (100% vibe coded with gemini)
