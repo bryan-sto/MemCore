@@ -187,6 +187,35 @@ try {
     CREATE INDEX IF NOT EXISTS idx_cmd_project ON command_logs(project);
   `);
 
+  // ccr_cache: stores raw tool outputs for pyrtk compressed ref cache (CCR)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ccr_cache (
+      ref                TEXT PRIMARY KEY,
+      original           TEXT NOT NULL,
+      created_at         REAL NOT NULL,
+      ttl_seconds        INTEGER DEFAULT 86400,
+      source_tool        TEXT,
+      last_referenced_at REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ccr_created ON ccr_cache(created_at);
+  `);
+
+  // Ensure memories table has the source column for existing databases
+  try {
+    db.exec('ALTER TABLE memories ADD COLUMN source TEXT DEFAULT "mcp";');
+    console.error('[MemCore] Added source column to memories table.');
+  } catch (_) {
+    // Column already exists, safe to ignore
+  }
+
+  // Ensure memories table has the last_referenced_at column for existing databases
+  try {
+    db.exec('ALTER TABLE memories ADD COLUMN last_referenced_at TEXT;');
+    console.error('[MemCore] Added last_referenced_at column to memories table.');
+  } catch (_) {
+    // Column already exists, safe to ignore
+  }
+
   // FTS5 virtual tables
   try {
     db.exec(`
@@ -454,12 +483,73 @@ function indexConceptEdges(conceptsStr, project) {
 /**
  * Save a memory, mirror to FTS5 + observations log, and index concept edges.
  */
-async function saveMemory(content, type = 'observation', concepts = '', files = '', project = '') {
-  const id           = crypto.randomUUID();
-  const ts           = new Date().toISOString();
+async function saveMemory(content, type = 'observation', concepts = '', files = '', project = '', source = 'mcp') {
+  const normProject  = project || defaultProject;
+  const normSource   = source || 'mcp';
   const normConcepts = Array.isArray(concepts) ? concepts.join(',') : (concepts || '');
   const normFiles    = Array.isArray(files)    ? files.join(',')    : (files    || '');
-  const normProject  = project || defaultProject;
+
+  // 1. Dedup pass on ingestion
+  try {
+    const candidates = await searchMemories(content, 3, normProject);
+    for (const cand of candidates) {
+      const exactMatch = cand.content.trim().toLowerCase() === content.trim().toLowerCase();
+      const highlySimilar = cand.type === type && cand._cosine >= 0.90;
+      
+      if (exactMatch || highlySimilar) {
+        // Merge concept tags
+        const existingTags = new Set((cand.concepts || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean));
+        normConcepts.split(',').map(t => t.trim().toLowerCase()).filter(Boolean).forEach(t => existingTags.add(t));
+        const mergedConcepts = [...existingTags].join(',');
+
+        // Merge files
+        const existingFiles = new Set((cand.files || '').split(',').map(f => f.trim().toLowerCase()).filter(Boolean));
+        normFiles.split(',').map(f => f.trim().toLowerCase()).filter(Boolean).forEach(f => existingFiles.add(f));
+        const mergedFiles = [...existingFiles].join(',');
+
+        const ts = new Date().toISOString();
+        db.prepare(`
+          UPDATE memories
+          SET confidence = MIN(1.0, confidence + 0.1),
+              concepts = ?,
+              files = ?,
+              source = ?,
+              timestamp = ?
+          WHERE id = ?
+        `).run(mergedConcepts, mergedFiles, normSource, ts, cand.id);
+
+        console.error(`[DB DEDUP] Merged memory duplicate on write. Existing ID: ${cand.id}. Score: ${cand.score}`);
+
+        try {
+          db.prepare(`
+            UPDATE memories_fts
+            SET content = ?, concepts = ?, files = ?
+            WHERE content_id = ?
+          `).run(cand.content, mergedConcepts, mergedFiles, cand.id);
+        } catch (_) {}
+
+        return {
+          id: cand.id,
+          session_id: cand.session_id,
+          content: cand.content,
+          type: cand.type,
+          concepts: mergedConcepts,
+          files: mergedFiles,
+          project: cand.project,
+          timestamp: ts,
+          confidence: Math.min(1.0, (cand.confidence ?? 1.0) + 0.1),
+          source: normSource,
+          merged: true
+        };
+      }
+    }
+  } catch (dedupErr) {
+    console.error('[DB DEDUP Error]', dedupErr.message);
+  }
+
+  // 2. Normal creation if not a duplicate
+  const id           = crypto.randomUUID();
+  const ts           = new Date().toISOString();
   const sid          = resolveSessionId(null, normProject);
 
   console.error(`[DB CREATE] saveMemory id=${id} type=${type} project=${normProject} concepts="${normConcepts}" content="${content.slice(0, 60)}"`);
@@ -469,8 +559,8 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   const embeddingStr = embedding ? JSON.stringify(embedding) : null;
 
   db.prepare(
-    'INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?)'
-  ).run(id, sid, content, type, normConcepts, normFiles, normProject, ts, embeddingStr);
+    'INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?)'
+  ).run(id, sid, content, type, normConcepts, normFiles, normProject, ts, embeddingStr, normSource);
 
   try {
     db.prepare(
@@ -485,7 +575,7 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   // Index concept relationships for graph expansion
   indexConceptEdges(normConcepts, normProject);
 
-  return { id, session_id: sid, content, type, concepts: normConcepts, files: normFiles, project: normProject, timestamp: ts, confidence: 1.0, embedding };
+  return { id, session_id: sid, content, type, concepts: normConcepts, files: normFiles, project: normProject, timestamp: ts, confidence: 1.0, embedding, source: normSource };
 }
 
 /** Delete a memory by ID. */
@@ -607,11 +697,13 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0) {
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 
-  // Reinforce confidence for returned memories (neural-pathway style traversal)
+  // Reinforce confidence for returned memories (neural-pathway style traversal) and update last_referenced_at
+  const refTs = new Date().toISOString();
   for (const r of ranked) {
     try {
-      db.prepare('UPDATE memories SET confidence = MIN(1.0, confidence + 0.1) WHERE id = ?').run(r.id);
+      db.prepare('UPDATE memories SET confidence = MIN(1.0, confidence + 0.1), last_referenced_at = ? WHERE id = ?').run(refTs, r.id);
       r.confidence = Math.min(1.0, (r.confidence ?? 1.0) + 0.1);
+      r.last_referenced_at = refTs;
     } catch (_) {}
   }
 
@@ -864,18 +956,27 @@ async function processHookEvent(event, data = {}) {
       const content  = `[hook:PostToolUse] Tool: ${tool_name}. Result: ${truncated}`;
       const concepts = [tool_name, ...Object.keys(tool_args || {}).slice(0, 3)].join(',');
 
-      return await saveMemory(content, 'hook_observation', concepts, '', project);
+      return await saveMemory(content, 'hook_observation', concepts, '', project, 'tool');
     }
 
     case 'UserPrompt': {
       const { prompt = '', project = '' } = data;
       if (prompt.length < HOOK_MIN_CONTENT_LEN) return { skipped: true, reason: 'prompt too short' };
+      
+      // Update rolling verbosity preference
+      try {
+        updateVerbosityPreference(prompt);
+      } catch (err) {
+        console.error('[Verbosity Learn Error]', err.message);
+      }
+
       return await saveMemory(
         `[hook:UserPrompt] ${prompt.slice(0, 600)}`,
         'user_prompt',
         '',
         '',
-        project
+        project,
+        'user'
       );
     }
 
@@ -901,9 +1002,9 @@ async function processHookEvent(event, data = {}) {
     }
 
     case 'Manual': {
-      const { content, type = 'observation', concepts = '', files = '', project = '' } = data;
+      const { content, type = 'observation', concepts = '', files = '', project = '', source = 'mcp' } = data;
       if (!content) return { error: 'content required for Manual hook event' };
-      return await saveMemory(content, type, concepts, files, project);
+      return await saveMemory(content, type, concepts, files, project, source);
     }
 
     default:
@@ -947,7 +1048,7 @@ async function importAll(data) {
     } catch (_) {}
     
     const insertSession = db.prepare('INSERT INTO sessions (id, project, cwd, started_at, ended_at) VALUES (?, ?, ?, ?, ?)');
-    const insertMemory = db.prepare('INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const insertMemory = db.prepare('INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     const insertObs = db.prepare('INSERT INTO observations (id, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)');
     const insertLesson = db.prepare('INSERT INTO lessons (id, content, context, confidence, project, tags, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
     const insertSlot = db.prepare('INSERT INTO slots (label, content, size_limit, description, pinned, scope, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -962,7 +1063,7 @@ async function importAll(data) {
     
     if (Array.isArray(data.memories)) {
       for (const m of data.memories) {
-        insertMemory.run(m.id, m.session_id, m.content, m.type, m.concepts, m.files, m.project, m.timestamp, m.confidence ?? 1.0, m.embedding);
+        insertMemory.run(m.id, m.session_id, m.content, m.type, m.concepts, m.files, m.project, m.timestamp, m.confidence ?? 1.0, m.embedding, m.source ?? 'mcp');
         try {
           db.prepare('INSERT INTO memories_fts (content, concepts, files, content_id) VALUES (?, ?, ?, ?)')
             .run(m.content, m.concepts || '', m.files || '', m.id);
@@ -1087,11 +1188,15 @@ function consolidateDatabase() {
       }
     }
 
-    // 3. Compact database
+    // 3. Prune expired CCR cache entries
+    const nowSec = Date.now() / 1000;
+    const ccrPruned = db.prepare('DELETE FROM ccr_cache WHERE (created_at + ttl_seconds) < ?').run(nowSec).changes;
+
+    // 4. Compact database
     db.exec('PRAGMA incremental_vacuum(100);');
 
     db.exec('COMMIT;');
-    console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}.`);
+    console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}. CCR pruned: ${ccrPruned}.`);
 
     return {
       status: 'ok',
@@ -1101,12 +1206,197 @@ function consolidateDatabase() {
         memories_pruned: memoriesPruned,
         lessons_decayed: lessonsDecayed,
         lessons_pruned: lessonsPruned,
+        ccr_pruned: ccrPruned,
       }
     };
   } catch (err) {
     db.exec('ROLLBACK;');
     throw err;
   }
+}
+
+/** Store a raw payload in the CCR cache. */
+function ccrStore(ref, original, ttlSeconds = 86400, sourceTool = '') {
+  const ts = Date.now() / 1000;
+  const ttl = Number(ttlSeconds) || 86400;
+  db.prepare(`
+    INSERT OR REPLACE INTO ccr_cache (ref, original, created_at, ttl_seconds, source_tool, last_referenced_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(ref, original, ts, ttl, sourceTool || null, ts);
+  return { success: true, ref };
+}
+
+/** Retrieve a raw payload from the CCR cache by reference key. */
+function ccrRetrieve(ref) {
+  const row = db.prepare('SELECT * FROM ccr_cache WHERE ref = ?').get(ref);
+  if (!row) return { error: `Reference '${ref}' not found.` };
+  
+  // Check expiration
+  const now = Date.now() / 1000;
+  if (row.created_at + row.ttl_seconds < now) {
+    db.prepare('DELETE FROM ccr_cache WHERE ref = ?').run(ref);
+    return { error: `Reference '${ref}' has expired.` };
+  }
+  
+  // Update last_referenced_at
+  try {
+    db.prepare('UPDATE ccr_cache SET last_referenced_at = ? WHERE ref = ?').run(now, ref);
+  } catch (_) {}
+  
+  return { ref: row.ref, original: row.original, source_tool: row.source_tool, created_at: row.created_at };
+}
+
+/** Calculate the recency-weighted compression safety score of a memory or cache key. */
+function getCompressionSafetyScore(itemId) {
+  // 1. Try finding in memories table
+  let row = db.prepare('SELECT timestamp, last_referenced_at, confidence FROM memories WHERE id = ?').get(itemId);
+  if (row) {
+    const lastRef = row.last_referenced_at || row.timestamp;
+    const ageMs = Date.now() - new Date(lastRef).getTime();
+    const ageMinutes = ageMs / (1000 * 60);
+    
+    // Decays gracefully: hot if referenced within 15 mins (1.0), decays to 0.1 over 24 hours
+    let recencyWeight = 0.1;
+    if (ageMinutes <= 15) {
+      recencyWeight = 1.0;
+    } else if (ageMinutes <= 120) {
+      recencyWeight = 1.0 - ((ageMinutes - 15) / 105) * 0.5;
+    } else if (ageMinutes <= 1440) {
+      recencyWeight = 0.5 - ((ageMinutes - 120) / 1320) * 0.4;
+    }
+    
+    const confidence = row.confidence ?? 1.0;
+    const finalScore = recencyWeight * confidence;
+    
+    return {
+      type: 'memory',
+      id: itemId,
+      last_referenced_at: lastRef,
+      age_minutes: ageMinutes,
+      confidence: confidence,
+      score: Number(finalScore.toFixed(4)),
+      is_hot: finalScore >= 0.5
+    };
+  }
+  
+  // 2. Try finding in ccr_cache table
+  row = db.prepare('SELECT created_at, last_referenced_at FROM ccr_cache WHERE ref = ?').get(itemId);
+  if (row) {
+    const lastRefTime = row.last_referenced_at || row.created_at;
+    const now = Date.now() / 1000;
+    const ageMinutes = (now - lastRefTime) / 60;
+    
+    // CCR entries are short-lived. Hot within 5 minutes, decays to 0.1 after 60 minutes
+    let recencyWeight = 0.1;
+    if (ageMinutes <= 5) {
+      recencyWeight = 1.0;
+    } else if (ageMinutes <= 60) {
+      recencyWeight = 1.0 - ((ageMinutes - 5) / 55) * 0.9;
+    }
+    
+    return {
+      type: 'ccr_cache',
+      ref: itemId,
+      last_referenced_at: new Date(lastRefTime * 1000).toISOString(),
+      age_minutes: ageMinutes,
+      score: Number(recencyWeight.toFixed(4)),
+      is_hot: recencyWeight >= 0.5
+    };
+  }
+  
+  return { error: `Item/Reference '${itemId}' not found.` };
+}
+
+/** Analyze user prompt for verbosity triggers and update preference rolling score. */
+function updateVerbosityPreference(prompt) {
+  const p = (prompt || '').toLowerCase();
+  
+  const terseKeywords = [
+    'shorter', 'terse', 'brief', 'concise', 'be concise', 'caveman', 
+    'less token', 'less text', 'no explanation', 'cut the chatter', 
+    'summarize', 'one sentence', 'quick response', 'shorten'
+  ];
+  
+  const verboseKeywords = [
+    'elaborate', 'explain in detail', 'more details', 'verbose', 
+    'give examples', 'long reply', 'deep dive', 'step by step', 
+    'thoroughly', 'explain why', 'comprehensive', 'walk me through'
+  ];
+  
+  let matchTerse = terseKeywords.some(kw => p.includes(kw));
+  let matchVerbose = verboseKeywords.some(kw => p.includes(kw));
+  
+  if (!matchTerse && !matchVerbose) return;
+  
+  let currentScore = 0.5;
+  let slotExists = false;
+  try {
+    const existing = db.prepare('SELECT content FROM slots WHERE label = ?').get('VERBOSITY_PREFERENCE');
+    if (existing && existing.content) {
+      slotExists = true;
+      const parsed = JSON.parse(existing.content);
+      currentScore = parsed.score ?? 0.5;
+    }
+  } catch (_) {}
+  
+  if (!slotExists) {
+    try {
+      createSlot('VERBOSITY_PREFERENCE', JSON.stringify({ score: 0.5, last_updated: new Date().toISOString(), summary: 'balanced' }), 1048576, 'Learned user response verbosity preference.', 1, 'global');
+    } catch (_) {}
+  }
+  
+  if (matchTerse) {
+    currentScore = Math.max(0.0, currentScore - 0.15);
+  }
+  if (matchVerbose) {
+    currentScore = Math.min(1.0, currentScore + 0.15);
+  }
+  
+  let summary = 'balanced';
+  if (currentScore <= 0.35) {
+    summary = 'terse';
+  } else if (currentScore >= 0.65) {
+    summary = 'verbose';
+  }
+  
+  const newPref = {
+    score: Number(currentScore.toFixed(2)),
+    last_updated: new Date().toISOString(),
+    summary,
+    match_terse: matchTerse,
+    match_verbose: matchVerbose
+  };
+  
+  replaceSlot('VERBOSITY_PREFERENCE', JSON.stringify(newPref));
+  console.error(`[VERBOSITY PREFERENCE] Learned preference updated. Score: ${newPref.score} (${newPref.summary})`);
+}
+
+/** Group and retrieve recent tool errors/failures for pattern mining. */
+function mineFailures(project = '', limit = 10) {
+  const normProject = project || '';
+  const searchTerms = ['%error%', '%failed%', '%exception%', '%rejected%', '%timeout%', '%exit code%'];
+  const clauses = searchTerms.map(() => 'content LIKE ?').join(' OR ');
+  
+  const params = [...searchTerms];
+  let sql = `SELECT * FROM memories WHERE (${clauses})`;
+  if (normProject) {
+    sql += ' AND project = ?';
+    params.push(normProject);
+  }
+  sql += ' ORDER BY timestamp DESC LIMIT ?';
+  params.push(Number(limit) || 10);
+  
+  const failures = db.prepare(sql).all(...params);
+  
+  return failures.map(f => ({
+    id: f.id,
+    timestamp: f.timestamp,
+    type: f.type,
+    concepts: f.concepts,
+    content: f.content,
+    project: f.project,
+    source: f.source
+  }));
 }
 
 // ─── 7. HTTP Router ────────────────────────────────────────────────────────────
@@ -1236,7 +1526,40 @@ async function routeHttpRequest(url, method, body, sendJson) {
   // POST /agentmemory/remember
   if (pathName === '/agentmemory/remember' && method === 'POST') {
     if (!body.content) { sendJson(400, { error: "Missing 'content'" }); return; }
-    sendJson(201, await saveMemory(body.content, body.type, body.concepts, body.files, body.project));
+    sendJson(201, await saveMemory(body.content, body.type, body.concepts, body.files, body.project, body.source));
+    return;
+  }
+
+  // POST /agentmemory/ccr/store
+  if (pathName === '/agentmemory/ccr/store' && method === 'POST') {
+    if (!body.ref || !body.original) { sendJson(400, { error: "Missing 'ref' or 'original'" }); return; }
+    sendJson(201, ccrStore(body.ref, body.original, body.ttl_seconds, body.source_tool));
+    return;
+  }
+
+  // GET|POST /agentmemory/ccr/retrieve
+  if (pathName === '/agentmemory/ccr/retrieve') {
+    const refParam = parsedUrl.searchParams.get('ref') || body.ref || '';
+    if (!refParam) { sendJson(400, { error: "Missing 'ref'" }); return; }
+    const res = ccrRetrieve(refParam);
+    sendJson(res.error ? 404 : 200, res);
+    return;
+  }
+
+  // GET|POST /agentmemory/compression-safety
+  if (pathName === '/agentmemory/compression-safety') {
+    const idParam = parsedUrl.searchParams.get('id') || body.id || '';
+    if (!idParam) { sendJson(400, { error: "Missing 'id'" }); return; }
+    const res = getCompressionSafetyScore(idParam);
+    sendJson(res.error ? 404 : 200, res);
+    return;
+  }
+
+  // GET|POST /agentmemory/mine-failures
+  if (pathName === '/agentmemory/mine-failures') {
+    const projParam = parsedUrl.searchParams.get('project') || body.project || '';
+    const limParam = parseInt(parsedUrl.searchParams.get('limit') || body.limit || '10', 10);
+    sendJson(200, mineFailures(projParam, limParam));
     return;
   }
 
@@ -1461,6 +1784,7 @@ const toolsRegistry = [
         concepts: { type: 'string', description: 'Comma-separated concept tags for search and graph expansion.' },
         files:    { type: 'string', description: 'Comma-separated relative file paths referenced.' },
         project:  { type: 'string', description: 'Project name. Defaults to cwd folder name.' },
+        source:   { type: 'string', description: 'The source agent or tool (e.g. claude, gemini, pyrtk).' },
       },
       required: ['content'],
     },
@@ -1647,6 +1971,53 @@ const toolsRegistry = [
       required: ['event'],
     },
   },
+  {
+    name: 'memory_ccr_store',
+    description: 'Store a raw payload in the CCR cache, returning a compact reference key.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:         { type: 'string', description: 'The unique reference key (e.g. SHA-256 hash or UUID).' },
+        original:    { type: 'string', description: 'The raw, original payload text/data.' },
+        ttl_seconds: { type: 'number', description: 'TTL in seconds (default 86400 / 24 hours).' },
+        source_tool: { type: 'string', description: 'Name of the tool that produced this payload.' },
+      },
+      required: ['ref', 'original'],
+    },
+  },
+  {
+    name: 'memory_ccr_retrieve',
+    description: 'Retrieve a raw payload from the CCR cache by its reference key.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'string', description: 'The unique reference key.' },
+      },
+      required: ['ref'],
+    },
+  },
+  {
+    name: 'memory_compression_safety',
+    description: 'Calculate the recency-weighted compression-safety score for a memory or CCR cache key. High score means "hot" (do not compress).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The memory UUID or CCR cache reference key.' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'memory_mine_failures',
+    description: 'Query database logs for tool execution errors and failures to help the agent distill failure-pattern mitigations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Filter by project name.' },
+        limit:   { type: 'number', description: 'Max failures to retrieve (default 10).' },
+      },
+    },
+  },
 ];
 
 // ─── 10. MCP Tool Executor ─────────────────────────────────────────────────────
@@ -1655,7 +2026,15 @@ async function executeMcpTool(name, args) {
   console.error(`[MCP] ${name}`);
   switch (name) {
     case 'memory_save':
-      return await saveMemory(args.content, args.type, args.concepts, args.files, args.project);
+      return await saveMemory(args.content, args.type, args.concepts, args.files, args.project, args.source);
+    case 'memory_ccr_store':
+      return ccrStore(args.ref, args.original, args.ttl_seconds, args.source_tool);
+    case 'memory_ccr_retrieve':
+      return ccrRetrieve(args.ref);
+    case 'memory_compression_safety':
+      return getCompressionSafetyScore(args.id);
+    case 'memory_mine_failures':
+      return mineFailures(args.project, args.limit);
     case 'memory_smart_search':
       return await searchMemories(args.query, args.limit || 5, args.project, 0);
     case 'memory_recall':

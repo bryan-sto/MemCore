@@ -299,6 +299,131 @@ async function testRunner() {
     await fetch(`${BASE_URL}/memories/${memB.id}`, { method: 'DELETE' });
   }
 
+  // ── 11. CCR Cache ──────────────────────────────────────────────────────────
+  section('11. Original-Payload Cache (CCR)');
+  
+  const ccrRef = 'test-ccr-ref-123';
+  const ccrPayload = 'This is a large tool output that should be stored as original payload cache entry.';
+  
+  // Store
+  const storeRes = await post('/ccr/store', {
+    ref: ccrRef,
+    original: ccrPayload,
+    ttl_seconds: 60,
+    source_tool: 'git_diff'
+  });
+  storeRes.success ? pass('CCR cache entry stored', `ref=${storeRes.ref}`) : fail('CCR store failed', JSON.stringify(storeRes));
+  
+  // Retrieve
+  const retrieveRes = await get(`/ccr/retrieve?ref=${ccrRef}`);
+  retrieveRes.original === ccrPayload
+    ? pass('CCR cache entry retrieved matches', `ref=${retrieveRes.ref}`)
+    : fail('CCR retrieve failed or mismatch', JSON.stringify(retrieveRes));
+
+  // ── 12. Ingestion Deduplication & Provenance ─────────────────────────────────
+  section('12. Ingestion Deduplication & Provenance');
+  
+  // Save first memory
+  const dedupMem1 = await post('/remember', {
+    content: 'React Server Components execute only on the server to reduce bundle sizes.',
+    type: 'convention',
+    concepts: 'react,rsc',
+    project: 'test-v3',
+    source: 'claude'
+  });
+  
+  // Save duplicate (near-duplicate) memory with different concepts/files/source
+  const dedupMem2 = await post('/remember', {
+    content: 'React Server Components execute only on the server to reduce bundle sizes.',
+    type: 'convention',
+    concepts: 'rsc,performance',
+    files: 'components.tsx',
+    project: 'test-v3',
+    source: 'gemini'
+  });
+  
+  if (dedupMem2.merged && dedupMem2.id === dedupMem1.id) {
+    pass('Near-duplicate memory merged/deduplicated on write', `id=${dedupMem2.id}`);
+    
+    // Check merged fields
+    const dedupGetRes = await post('/smart-search', { query: 'React Server Components', project: 'test-v3' });
+    const dedupMergedMem = dedupGetRes.find(m => m.id === dedupMem1.id);
+    
+    if (dedupMergedMem && dedupMergedMem.concepts.includes('performance') && dedupMergedMem.files.includes('components.tsx') && dedupMergedMem.source === 'gemini') {
+      pass('Duplicate concepts, files, and source successfully merged', `concepts=${dedupMergedMem.concepts} files=${dedupMergedMem.files} source=${dedupMergedMem.source}`);
+    } else {
+      fail('Merged memory fields mismatch', JSON.stringify(dedupMergedMem));
+    }
+  } else {
+    fail('Memory duplication not detected or not merged', JSON.stringify(dedupMem2));
+  }
+
+  // Clean up React memory
+  if (dedupMem1.id) {
+    await fetch(`${BASE_URL}/memories/${dedupMem1.id}`, { method: 'DELETE' });
+  }
+
+  // ── 13. Compression Safety ──────────────────────────────────────────────────
+  section('13. Compression Safety Score');
+  
+  // Test memory safety
+  const safetyTestMem = await post('/remember', {
+    content: 'SQLite is an in-process library that implements a self-contained SQL database engine.',
+    type: 'observation',
+    project: 'test-v3'
+  });
+  
+  // Search to update last_referenced_at
+  await post('/smart-search', { query: 'SQLite self-contained database' });
+  
+  const safetyTestScore = await get(`/compression-safety?id=${safetyTestMem.id}`);
+  safetyTestScore.score >= 0.5 && safetyTestScore.is_hot
+    ? pass('Hot memory compression safety score verified', `score=${safetyTestScore.score}`)
+    : fail('Safety score calculation failed', JSON.stringify(safetyTestScore));
+
+  // Clean up
+  if (safetyTestMem.id) {
+    await fetch(`${BASE_URL}/memories/${safetyTestMem.id}`, { method: 'DELETE' });
+  }
+
+  // ── 14. Verbosity learning & Failure mining ─────────────────────────────────
+  section('14. Verbosity Learning & Failure Mining');
+  
+  // Test verbosity preference learning via hook
+  await post('/hook', {
+    event: 'UserPrompt',
+    prompt: 'Can you give me a very brief, terse response? I would like to keep my token usage extremely low for this coding session to optimize cost.',
+    project: 'test-v3'
+  });
+  
+  const prefTestSlots = await get('/slot?label=VERBOSITY_PREFERENCE');
+  const prefTestSlot = Array.isArray(prefTestSlots) ? prefTestSlots.find(s => s.label === 'VERBOSITY_PREFERENCE') : null;
+  if (prefTestSlot && prefTestSlot.content) {
+    const prefTestObj = JSON.parse(prefTestSlot.content);
+    prefTestObj.summary === 'terse'
+      ? pass('Verbosity preference learned successfully', `score=${prefTestObj.score} (${prefTestObj.summary})`)
+      : fail('Verbosity learning failed', JSON.stringify(prefTestObj));
+  } else {
+    fail('VERBOSITY_PREFERENCE slot not found');
+  }
+
+  // Test failure mining
+  const failedTestMem = await post('/remember', {
+    content: 'Tool: execute_command failed with exit code 1: Command not found.',
+    type: 'bug',
+    project: 'test-v3'
+  });
+  
+  const minedFailuresList = await get('/mine-failures?project=test-v3&limit=5');
+  minedFailuresList.length > 0 && minedFailuresList[0].content.includes('failed')
+    ? pass('Failure patterns mined successfully', `count=${minedFailuresList.length} top="${minedFailuresList[0].content.slice(0, 40)}"`)
+    : fail('Failure mining failed', JSON.stringify(minedFailuresList));
+
+  // Clean up
+  if (failedTestMem.id) {
+    await fetch(`${BASE_URL}/memories/${failedTestMem.id}`, { method: 'DELETE' });
+  }
+
   // ── Summary ─────────────────────────────────────────────────────────────────
   console.log(`\n${CYAN}${BOLD}╔══════════════════════════════════════════════╗`);
   console.log(`║               TEST RESULTS                  ║`);
