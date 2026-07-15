@@ -41,6 +41,14 @@ const HOOK_IGNORE_TOOLS = new Set([
 // Minimum content length to auto-save from a hook (avoid saving trivial results)
 const HOOK_MIN_CONTENT_LEN = 80;
 
+// Reuses the same failure vocabulary as mineFailures() so "what counts as a
+// failure" stays in one place. Used to auto-derive lessons: if a tool call
+// fails, then a later call to the *same* tool succeeds within the window,
+// that failure->fix pair is worth remembering as a lesson, not just a memory.
+const FAILURE_PATTERN = /error|failed|exception|rejected|timeout|exit code [1-9]/i;
+const LESSON_RETRY_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+const _recentToolFailures = new Map(); // tool_name -> { content, timestamp, project }
+
 if (!fs.existsSync(MEMCORE_DIR)) {
   fs.mkdirSync(MEMCORE_DIR, { recursive: true });
 }
@@ -955,6 +963,30 @@ async function processHookEvent(event, data = {}) {
 
       const content  = `[hook:PostToolUse] Tool: ${tool_name}. Result: ${truncated}`;
       const concepts = [tool_name, ...Object.keys(tool_args || {}).slice(0, 3)].join(',');
+
+      const isFailure = FAILURE_PATTERN.test(resultStr);
+      const now = Date.now();
+
+      if (isFailure) {
+        // Remember this failure so a later success on the same tool can be
+        // recognized as the fix.
+        _recentToolFailures.set(tool_name, { content: truncated, timestamp: now, project });
+      } else {
+        const prior = _recentToolFailures.get(tool_name);
+        if (prior && (now - prior.timestamp) <= LESSON_RETRY_WINDOW_MS) {
+          const lessonContent =
+            `When using ${tool_name}, a prior attempt failed (${prior.content.slice(0, 200)}) ` +
+            `and a subsequent call succeeded (${truncated.slice(0, 200)}). ` +
+            `Worth checking what changed between the two calls before repeating the failure.`;
+          try {
+            await saveLesson(lessonContent, `auto-derived from ${tool_name} failure->success`, 0.6, project, concepts);
+            console.error(`[HOOK] Auto-derived lesson for ${tool_name} (failure->success within window)`);
+          } catch (err) {
+            console.error('[HOOK Lesson Derivation Error]', err.message);
+          }
+          _recentToolFailures.delete(tool_name);
+        }
+      }
 
       return await saveMemory(content, 'hook_observation', concepts, '', project, 'tool');
     }
@@ -1906,6 +1938,18 @@ const toolsRegistry = [
     },
   },
   {
+    name: 'memory_slot_append',
+    description: 'Append text to an existing slot without overwriting its current content. Enforces the slot size limit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Slot label.' },
+        text:  { type: 'string', description: 'Text to append.' },
+      },
+      required: ['label', 'text'],
+    },
+  },
+  {
     name: 'memory_slot_list',
     description: 'List all memory slots (pinned first).',
     inputSchema: { type: 'object', properties: {} },
@@ -2057,6 +2101,8 @@ async function executeMcpTool(name, args) {
     }
     case 'memory_slot_replace':
       return replaceSlot(args.label, args.content);
+    case 'memory_slot_append':
+      return appendSlot(args.label, args.text);
     case 'memory_slot_list':
       return db.prepare('SELECT * FROM slots ORDER BY pinned DESC, label ASC').all();
     case 'memory_slot_delete':
