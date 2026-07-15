@@ -497,11 +497,15 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   const normConcepts = Array.isArray(concepts) ? concepts.join(',') : (concepts || '');
   const normFiles    = Array.isArray(files)    ? files.join(',')    : (files    || '');
 
+  // Generate embedding once upfront to avoid double calculation in dedup pass
+  const embedding = await getEmbedding(content);
+  const embeddingStr = embedding ? JSON.stringify(embedding) : null;
+
   // 1. Dedup pass on ingestion
   try {
-    const candidates = await searchMemories(content, 3, normProject);
+    const candidates = await searchMemories(content, 3, normProject, 0, embedding);
     for (const cand of candidates) {
-      const exactMatch = cand.content.trim().toLowerCase() === content.trim().toLowerCase();
+      const exactMatch = cand.type === type && cand.content.trim().toLowerCase() === content.trim().toLowerCase();
       const highlySimilar = cand.type === type && cand._cosine >= 0.90;
       
       if (exactMatch || highlySimilar) {
@@ -562,10 +566,6 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
 
   console.error(`[DB CREATE] saveMemory id=${id} type=${type} project=${normProject} concepts="${normConcepts}" content="${content.slice(0, 60)}"`);
 
-  // Generate embedding asynchronously
-  const embedding = await getEmbedding(content);
-  const embeddingStr = embedding ? JSON.stringify(embedding) : null;
-
   db.prepare(
     'INSERT INTO memories (id, session_id, content, type, concepts, files, project, timestamp, confidence, embedding, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?)'
   ).run(id, sid, content, type, normConcepts, normFiles, normProject, ts, embeddingStr, normSource);
@@ -623,14 +623,14 @@ function cosineSimilarity(vecA, vecB) {
  * 6. Combine Vector Similarity and BM25 scores for final ranking
  * 7. Optionally trim to token_budget (approx chars / 4)
  */
-async function searchMemories(query, limit = 5, project = '', tokenBudget = 0) {
+async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, queryEmbedding = null) {
   const normProject  = project || '';
   const rawTokens    = tokenise(query);
   const tokens       = expandQueryConcepts(rawTokens, normProject);
   console.error(`[DB READ] searchMemories query="${query}" expanded=[${tokens.join(',')}] project="${normProject}"`);
 
-  // Generate query embedding asynchronously
-  const queryVec = await getEmbedding(query);
+  // Generate query embedding asynchronously (or reuse pre-computed)
+  const queryVec = queryEmbedding || await getEmbedding(query);
 
   let results = [];
 
@@ -1044,7 +1044,7 @@ async function processHookEvent(event, data = {}) {
   }
 }
 
-/** Export full DB as a single JSON snapshot. */
+/** Export full DB as a single JSON snapshot. Note: ccr_cache is excluded intentionally as it is transient/short-lived by design. */
 function exportAll() {
   return {
     exported_at:   new Date().toISOString(),

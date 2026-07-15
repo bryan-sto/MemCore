@@ -38,9 +38,14 @@ function runBackup() {
   const backupPath = path.join(BACKUPS_DIR, backupFileName);
 
   try {
-    // Copy the database file
-    fs.copyFileSync(DB_PATH, backupPath);
-    console.log(`Successfully backed up database to: ${backupPath}`);
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(DB_PATH);
+    
+    // Escaped backup path for safe insertion into raw SQL string
+    const escapedBackupPath = backupPath.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${escapedBackupPath}';`);
+    
+    console.log(`Successfully backed up database (atomic VACUUM INTO) to: ${backupPath}`);
     console.log('Backup complete ✓');
   } catch (err) {
     console.error(`Backup failed: ${err.message}`);
