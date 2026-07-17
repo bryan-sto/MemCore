@@ -67,6 +67,147 @@ console.error = function (...args) {
 
 console.error(`[MemCore v${VERSION}] Starting up. DB: ${DB_PATH}`);
 
+// ─── 2b. Fast-path: if REST server already up, run as thin MCP stdio relay ────
+//
+// When the GUI and CLI both spawn agentmemory/index.js, both try to open the
+// same db.sqlite. The DB open + schema init + embedding preload can hold a WAL
+// write lock for 10-20s, longer than busy_timeout=5000. The second instance
+// times out, hits process.exit(1) at DB init, and the CLI's MCP handshake never
+// completes — causing the permanent "initializing..." hang.
+//
+// Solution: check port 3111 synchronously before touching the DB. If a live
+// server responds, skip DB init entirely and run as a thin stdio<->HTTP relay.
+
+function checkServerAlive() {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { hostname: 'localhost', port: PORT, path: '/agentmemory/livez', method: 'GET' },
+      (res) => { resolve(res.statusCode === 200); }
+    );
+    req.on('error', () => resolve(false));
+    req.setTimeout(1000, () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+async function runMcpRelayMode() {
+  // Connect this stdio MCP instance to the live REST server via HTTP.
+  // All tool calls are proxied through /agentmemory/mcp-relay.
+  console.error(`[MemCore] Port ${PORT} already active — relay mode.`);
+
+  const readline2 = require('readline');
+  const rl2 = readline2.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+  rl2.on('line', async (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let req2;
+    try {
+      req2 = JSON.parse(trimmed);
+    } catch (_) { return; }
+
+    const { method, id, params } = req2;
+
+    // Respond to lifecycle messages locally without a round-trip
+    if (method === 'initialize') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'memcore', version: VERSION },
+        },
+      }) + '\n');
+      return;
+    }
+    if (method === 'ping') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: {} }) + '\n');
+      return;
+    }
+    if (method === 'notifications/initialized' || method === 'notifications/cancelled') return;
+
+    // tools/list: proxy to REST endpoint added in new server code
+    if (method === 'tools/list') {
+      try {
+        const body = await new Promise((resolve, reject) => {
+          const r = http.request(
+            { hostname: 'localhost', port: PORT, path: '/agentmemory/tools-list', method: 'GET' },
+            (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }
+          );
+          r.on('error', reject);
+          r.setTimeout(3000, () => { r.destroy(); reject(new Error('timeout')); });
+          r.end();
+        });
+        const parsed = JSON.parse(body);
+        // Validate: must be an array. If the primary server is old code it returns {"error":"..."}
+        const tools = Array.isArray(parsed) ? parsed : [];
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { tools } }) + '\n');
+      } catch (e) {
+        // Return empty tools list rather than error — CLI can still work, tools just won't show
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { tools: [] } }) + '\n');
+      }
+      return;
+    }
+
+    // tools/call: proxy to REST
+    if (method === 'tools/call') {
+      const { name, arguments: args } = params || {};
+      const payload = JSON.stringify({ name, arguments: args || {} });
+      try {
+        const body = await new Promise((resolve, reject) => {
+          const r = http.request(
+            {
+              hostname: 'localhost', port: PORT,
+              path: '/agentmemory/mcp-call',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+            },
+            (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }
+          );
+          r.on('error', reject);
+          r.setTimeout(15000, () => { r.destroy(); reject(new Error('timeout')); });
+          r.write(payload); r.end();
+        });
+        const result = JSON.parse(body);
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } }) + '\n');
+      } catch (e) {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true } }) + '\n');
+      }
+      return;
+    }
+
+    // Fallback for any method not explicitly handled above (e.g. resources/list,
+    // prompts/list — common capability-discovery calls many MCP clients send
+    // right after `initialize`). Previously these were silently dropped with no
+    // response at all, which left the client's request hanging forever if it
+    // waited on a reply before considering the connection ready — a likely
+    // contributor to "stuck on initializing" independent of the DB-lock issue.
+    // Requests (have an `id`) get an empty-result response; notifications
+    // (no `id`) are correctly left unanswered per JSON-RPC convention.
+    if (id !== undefined && id !== null) {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id,
+        result: {},
+      }) + '\n');
+    }
+  });
+
+  // Keep process alive
+  process.stdin.resume();
+}
+
+// Boot sequence: check if server alive first, then decide path
+(async () => {
+  const alive = await checkServerAlive();
+  if (alive) {
+    await runMcpRelayMode();
+    return; // don't fall through to DB init below
+  }
+  startFullServer();
+})();
+
+function startFullServer() {
+
 // ─── 3. Database ──────────────────────────────────────────────────────────────
 
 let db;
@@ -239,6 +380,7 @@ try {
   console.error('[MemCore] Fatal: could not open DB.', dbErr);
   process.exit(1);
 }
+// end of startFullServer() wrapper — closed at bottom of file
 
 // ─── 4. Session Bootstrap ─────────────────────────────────────────────────────
 
@@ -1444,6 +1586,25 @@ async function routeHttpRequest(url, method, body, sendJson) {
     return;
   }
 
+  // GET /agentmemory/tools-list  — used by relay instances to forward tools/list
+  if (pathName === '/agentmemory/tools-list' && method === 'GET') {
+    sendJson(200, toolsRegistry);
+    return;
+  }
+
+  // POST /agentmemory/mcp-call  — used by relay instances to forward tools/call
+  if (pathName === '/agentmemory/mcp-call' && method === 'POST') {
+    const { name, arguments: args } = body || {};
+    try {
+      const result = await executeMcpTool(name, args || {});
+      sendJson(200, result);
+    } catch (err) {
+      sendJson(500, { error: err.message });
+    }
+    return;
+  }
+
+
   // GET /agentmemory/diagnostics | /stats
   if (pathName === '/agentmemory/diagnostics' || pathName === '/agentmemory/stats') {
     sendJson(200, {
@@ -2178,6 +2339,16 @@ async function handleMcpRequest(req) {
     }
   }
   if (method === 'ping') return { jsonrpc: '2.0', id, result: {} };
+
+  // Fallback for any method not explicitly handled above (e.g. resources/list,
+  // prompts/list). Previously this returned null unconditionally, and the
+  // caller's `if (response) write(...)` silently dropped it — meaning any
+  // client waiting on a reply to one of these would hang forever. Requests
+  // (have an id) now get an empty-result response; notifications (no id) are
+  // correctly left unanswered.
+  if (id !== undefined && id !== null) {
+    return { jsonrpc: '2.0', id, result: {} };
+  }
   return null;
 }
 
@@ -2211,3 +2382,5 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
+
+} // end startFullServer()
