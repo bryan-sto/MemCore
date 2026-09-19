@@ -1136,9 +1136,9 @@
     .replace(/'/g, '&#39;').replace(/"/g, '&quot;');
 
   function fmtDate(ts) {
-    if (!ts) return '—';
+    if (!ts) return '-';
     let clean = String(ts).trim();
-    if (clean.includes('+') || (clean.includes('-') && clean.indexOf('-') > 4)) {
+    if (clean.includes('+') || (clean.lastIndexOf('-') > 10)) {
       if (clean.endsWith('Z')) {
         clean = clean.slice(0, -1);
       }
@@ -1157,7 +1157,7 @@
   function fmtAgo(ts) {
     if (!ts) return '';
     let clean = String(ts).trim();
-    if (clean.includes('+') || (clean.includes('-') && clean.indexOf('-') > 4)) {
+    if (clean.includes('+') || (clean.lastIndexOf('-') > 10)) {
       if (clean.endsWith('Z')) {
         clean = clean.slice(0, -1);
       }

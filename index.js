@@ -28,7 +28,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const PORT        = parseInt(process.env.MEMCORE_PORT || '3111', 10);
 const HOST        = process.env.MEMCORE_HOST || '127.0.0.1';
-const MEMCORE_DIR = process.env.MEMCORE_DIR || (fs.existsSync('D:\\Personal Project\\am\\db.sqlite') ? 'D:\\Personal Project\\am' : __dirname);
+const MEMCORE_DIR = process.env.MEMCORE_DIR || __dirname;
 const DB_PATH     = path.join(MEMCORE_DIR, 'db.sqlite');
 const LOG_FILE    = path.join(MEMCORE_DIR, 'memcore.log');
 const VERSION     = '3.1.0';
@@ -563,7 +563,7 @@ function bm25Rank(candidates, tokens, textField = 'content') {
 
   // Corpus-level stats over the candidate set (approximation for speed)
   const docTokenCounts = candidates.map(c => tokenise(c[textField] || ''));
-  const avgDocLen = docTokenCounts.reduce((s, t) => s + t.length, 0) / candidates.length;
+  const avgDocLen = Math.max(1, docTokenCounts.reduce((s, t) => s + t.length, 0) / candidates.length);
   const N = candidates.length;
 
   // Document frequency per query token within the candidate set
@@ -1355,7 +1355,7 @@ function buildContextPack(project = '', tokenBudget = 1500) {
     "SELECT type, content, confidence FROM memories WHERE project = ? AND type IN ('convention', 'arch', 'decision') ORDER BY confidence DESC, timestamp DESC LIMIT 5"
   ).all(normProject);
   if (conventions.length > 0) {
-    const convItems = conventions.map(c => `- [${c.type}] ${c.content.trim().replace(/\\s+/g, ' ')}`);
+    const convItems = conventions.map(c => `- [${c.type}] ${c.content.trim().replace(/\s+/g, ' ')}`);
     sections.push(`### Architecture & Conventions\n${convItems.join('\n')}`);
   }
 
@@ -1364,7 +1364,7 @@ function buildContextPack(project = '', tokenBudget = 1500) {
     "SELECT content, confidence FROM lessons WHERE project = ? ORDER BY confidence DESC, updated_at DESC LIMIT 5"
   ).all(normProject);
   if (lessons.length > 0) {
-    const lessonItems = lessons.map(l => `- (confidence: ${(l.confidence ?? 1.0).toFixed(1)}) ${l.content.trim().replace(/\\s+/g, ' ')}`);
+    const lessonItems = lessons.map(l => `- (confidence: ${(l.confidence ?? 1.0).toFixed(1)}) ${l.content.trim().replace(/\s+/g, ' ')}`);
     sections.push(`### Learned Best Practices\n${lessonItems.join('\n')}`);
   }
 
@@ -1555,19 +1555,50 @@ function consolidateDatabase() {
       }
     } catch (_) {}
 
-    // 5. Prune observations ledger: cap at 2000 entries
+    // 5. Prune observations ledger: cap at 2000 entries (mirror to observations_fts)
     try {
       const obsCount = db.prepare('SELECT count(*) as c FROM observations').get();
       if (obsCount && obsCount.c > 2000) {
-        db.prepare('DELETE FROM observations WHERE id IN (SELECT id FROM observations ORDER BY timestamp ASC LIMIT ?)').run(obsCount.c - 2000);
+        const excess = obsCount.c - 2000;
+        const oldObs = db.prepare('SELECT id FROM observations ORDER BY timestamp ASC LIMIT ?').all(excess);
+        db.prepare('DELETE FROM observations WHERE id IN (SELECT id FROM observations ORDER BY timestamp ASC LIMIT ?)').run(excess);
+        try {
+          const deleteObsFts = db.prepare('DELETE FROM observations_fts WHERE content_id = ?');
+          for (const o of oldObs) {
+            deleteObsFts.run(String(o.id));
+          }
+        } catch (_) {}
       }
     } catch (_) {}
 
-    // 6. Compact database
+    // 6. Prune orphan concept edges
+    let edgesPruned = 0;
+    try {
+      const allMemories = db.prepare('SELECT concepts FROM memories WHERE concepts IS NOT NULL').all();
+      const activeConcepts = new Set();
+      for (const m of allMemories) {
+        (m.concepts || '').split(',').forEach(c => {
+          const trimmed = c.trim().toLowerCase();
+          if (trimmed) activeConcepts.add(trimmed);
+        });
+      }
+      const edges = db.prepare('SELECT concept_a, concept_b, project FROM concept_edges').all();
+      const delEdge = db.prepare('DELETE FROM concept_edges WHERE concept_a = ? AND concept_b = ? AND project IS ?');
+      for (const e of edges) {
+        if (!activeConcepts.has(e.concept_a.toLowerCase()) && !activeConcepts.has(e.concept_b.toLowerCase())) {
+          const res = delEdge.run(e.concept_a, e.concept_b, e.project);
+          if (res.changes > 0) edgesPruned += res.changes;
+        }
+      }
+    } catch (err) {
+      console.error('[CONSOLIDATE EDGES ERROR]', err.message);
+    }
+
+    // 7. Compact database
     db.exec('PRAGMA incremental_vacuum(100);');
 
     db.exec('COMMIT;');
-    console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}. CCR pruned: ${ccrPruned}.`);
+    console.error(`[DB CONSOLIDATE] Done. Memories decayed: ${memoriesDecayed}, pruned: ${memoriesPruned}. Lessons decayed: ${lessonsDecayed}, pruned: ${lessonsPruned}. CCR pruned: ${ccrPruned}. Edges pruned: ${edgesPruned}.`);
 
     return {
       status: 'ok',
@@ -1578,6 +1609,7 @@ function consolidateDatabase() {
         lessons_decayed: lessonsDecayed,
         lessons_pruned: lessonsPruned,
         ccr_pruned: ccrPruned,
+        edges_pruned: edgesPruned,
       }
     };
   } catch (err) {
@@ -2158,6 +2190,15 @@ async function routeHttpRequest(url, method, body, sendJson) {
     return;
   }
 
+  // GET /agentmemory/command/history
+  if (pathName === '/agentmemory/command/history' && method === 'GET') {
+    const hours = parseInt(parsedUrl.searchParams.get('hours') || '24', 10);
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const rows = db.prepare('SELECT * FROM command_logs WHERE timestamp >= ? ORDER BY timestamp DESC').all(cutoff);
+    sendJson(200, { commands: rows });
+    return;
+  }
+
   sendJson(404, { error: `Endpoint '${pathName}' [${method}] not found in MemCore v${VERSION}` });
 }
 
@@ -2530,19 +2571,22 @@ async function executeMcpTool(name, args) {
     case 'memory_lesson_delete':
       return { success: deleteLesson(args.id), id: args.id };
     case 'memory_slot_create':
-      return createSlot(args.label, args.content, args.sizeLimit, args.description, args.pinned, args.scope);
+      return createSlot(args.label || args.name || '', args.content, args.sizeLimit, args.description, args.pinned, args.scope);
     case 'memory_slot_get': {
-      const s = db.prepare('SELECT * FROM slots WHERE label = ?').get(args.label);
-      return s || { error: `Slot '${args.label}' not found.` };
+      const label = args.label || args.name || '';
+      const s = db.prepare('SELECT * FROM slots WHERE label = ?').get(label);
+      return s || { error: `Slot '${label}' not found.` };
     }
     case 'memory_slot_replace':
-      return replaceSlot(args.label, args.content);
+      return replaceSlot(args.label || args.name || '', args.content);
     case 'memory_slot_append':
-      return appendSlot(args.label, args.text);
+      return appendSlot(args.label || args.name || '', args.text);
     case 'memory_slot_list':
       return db.prepare('SELECT * FROM slots ORDER BY pinned DESC, label ASC').all();
-    case 'memory_slot_delete':
-      return { success: deleteSlot(args.label), label: args.label };
+    case 'memory_slot_delete': {
+      const label = args.label || args.name || '';
+      return { success: deleteSlot(label), label };
+    }
     case 'memory_consolidate':
       return consolidateDatabase();
     case 'memory_diagnose':
