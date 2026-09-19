@@ -28,7 +28,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const PORT        = parseInt(process.env.MEMCORE_PORT || '3111', 10);
 const HOST        = process.env.MEMCORE_HOST || '127.0.0.1';
-const MEMCORE_DIR = process.env.MEMCORE_DIR || __dirname;
+const MEMCORE_DIR = process.env.MEMCORE_DIR || (fs.existsSync('D:\\Personal Project\\am\\db.sqlite') ? 'D:\\Personal Project\\am' : __dirname);
 const DB_PATH     = path.join(MEMCORE_DIR, 'db.sqlite');
 const LOG_FILE    = path.join(MEMCORE_DIR, 'memcore.log');
 const VERSION     = '3.1.0';
