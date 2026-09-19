@@ -1267,8 +1267,9 @@
     showNewForm = false;
     lastDataJSON = '';
     q('searchInput').value = '';
+    const targetBtn = el || document.querySelector(`.nav-tab-chip[data-tab="${tab}"]`);
     document.querySelectorAll('.nav-tab-chip').forEach(n => n.classList.remove('active'));
-    el.classList.add('active');
+    if (targetBtn) targetBtn.classList.add('active');
     
     if (simulationActive && tab !== 'graph') {
       cancelAnimationFrame(simulationActive);
@@ -1287,6 +1288,14 @@
 
     q('searchBarWrap').style.display = ['memories', 'lessons', 'observations'].includes(tab) ? '' : 'none';
     q('btnNew').style.display = tab === 'memories' ? '' : 'none';
+    loadData();
+  }
+
+  function filterByConcept(conceptName) {
+    switchTab('memories');
+    const input = q('searchInput');
+    if (input) input.value = conceptName;
+    lastDataJSON = '';
     loadData();
   }
 
@@ -1413,7 +1422,7 @@
             <span style="color:var(--body-muted)">${l.output_t.toLocaleString()}</span> / 
             <span style="color:var(--success);font-weight:600">-${l.saved_t.toLocaleString()}</span>
           </td>
-          <td style="font-size:13px;font-family:var(--font-mono);text-align:right;color:var(--success);font-weight:600">${l.pct.toFixed(1)}%</td>
+          <td style="font-size:13px;font-family:var(--font-mono);text-align:right;color:var(--success);font-weight:600">${(l.pct ?? 0).toFixed(1)}%</td>
           <td style="font-size:13px;font-family:var(--font-mono);text-align:right;color:var(--body-muted)">${l.exec_ms.toLocaleString()}ms</td>
         </tr>
       `).join('');
@@ -1429,7 +1438,7 @@
           </div>
           <div class="card-tile" style="text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
             <div style="font-size: 13px; text-transform: uppercase; color: var(--body-muted); letter-spacing: 0.5px; font-weight: 600;">Savings %</div>
-            <div style="font-size: 32px; font-weight: 700; font-family: var(--font-mono); color: var(--success);">${avgPct.toFixed(1)}%</div>
+            <div style="font-size: 32px; font-weight: 700; font-family: var(--font-mono); color: var(--success);">${(isNaN(avgPct) ? 0 : avgPct).toFixed(1)}%</div>
             <div style="font-size: 12px; color: var(--body-muted);">avg efficiency</div>
           </div>
           <div class="card-tile" style="text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
@@ -1560,6 +1569,8 @@
 
     let dragNode = null;
     let mouseX = 0, mouseY = 0;
+    let clickStartX = 0, clickStartY = 0;
+    let clickedNode = null;
 
     function getMousePos(e) {
       const cRect = canvas.getBoundingClientRect();
@@ -1571,11 +1582,15 @@
 
     canvas.onmousedown = (e) => {
       const pos = getMousePos(e);
+      clickStartX = pos.x;
+      clickStartY = pos.y;
+      clickedNode = null;
       for (const n of nodes) {
         const dx = n.x - pos.x;
         const dy = n.y - pos.y;
         if (dx * dx + dy * dy < n.radius * n.radius * 2) {
           dragNode = n;
+          clickedNode = n;
           break;
         }
       }
@@ -1590,11 +1605,26 @@
         dragNode.y = mouseY;
         dragNode.vx = 0;
         dragNode.vy = 0;
+      } else {
+        const hovering = nodes.some(n => {
+          const dx = n.x - pos.x;
+          const dy = n.y - pos.y;
+          return dx * dx + dy * dy < n.radius * n.radius * 2;
+        });
+        canvas.style.cursor = hovering ? 'pointer' : 'default';
       }
     };
 
     window.onmouseup = () => {
+      if (clickedNode && dragNode) {
+        const dx = mouseX - clickStartX;
+        const dy = mouseY - clickStartY;
+        if (dx * dx + dy * dy < 36) {
+          filterByConcept(clickedNode.name);
+        }
+      }
       dragNode = null;
+      clickedNode = null;
     };
 
     const kLink = 0.05;
@@ -1725,7 +1755,7 @@
       const hasVector = m.embedding && m.embedding !== 'null';
       const scoreRow = m.score !== undefined 
         ? `<div class="score-badge-group">
-             <span class="score-badge" title="Combined retrieval score">score: ${m.score.toFixed(3)}</span>
+             <span class="score-badge" title="Combined retrieval score">score: ${(m.score ?? 0).toFixed(3)}</span>
              <span class="score-badge" title="Cosine Vector similarity">cosine: ${m._cosine !== undefined ? m._cosine.toFixed(3) : '0.000'}</span>
              ${m._recency !== undefined ? `<span class="score-badge" title="Recency decay factor">recency: ${m._recency.toFixed(3)}</span>` : ''}
            </div>`
@@ -1746,16 +1776,74 @@
           </div>
           <div class="tile-content">${esc(m.content)}</div>
           <div class="tile-footer-row">
-            ${(m.concepts || '').split(',').filter(Boolean).map(c => `<span class="pill-label">${esc(c.trim())}</span>`).join('')}
+            ${(m.concepts || '').split(',').filter(Boolean).map(c => `<span class="pill-label" style="cursor:pointer" title="Click to filter by ${esc(c.trim())}" onclick="filterByConcept('${esc(c.trim())}')">${esc(c.trim())}</span>`).join('')}
             ${(m.files || '').split(',').filter(Boolean).map(f => `<span class="pill-label file"><i class="fa-solid fa-file-code"></i> ${esc(f.trim())}</span>`).join('')}
             <div class="card-actions-wrap">
-              <button class="btn-circle-utility" title="Delete memory" onclick="deleteMemory('${esc(m.id)}')">
+              <button class="btn-circle-utility" title="Edit memory" onclick="openEditMemory(this.dataset.id)" data-id="${esc(m.id)}">
+                <i class="fa-solid fa-pen-to-square"></i>
+              </button>
+              <button class="btn-circle-utility" title="Delete memory" onclick="deleteMemory(this.dataset.id)" data-id="${esc(m.id)}">
                 <i class="fa-solid fa-trash-can"></i>
               </button>
             </div>
           </div>
         </div>`;
     }).join('');
+  }
+
+  function openEditMemory(id) {
+    const tile = q(`mem-${id}`);
+    if (!tile) return;
+    const contentEl = tile.querySelector('.tile-content');
+    if (!contentEl || tile.querySelector('.inline-edit-area')) return;
+    
+    const origText = contentEl.textContent;
+    contentEl.style.display = 'none';
+    
+    const editArea = document.createElement('div');
+    editArea.className = 'inline-edit-area';
+    editArea.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin:8px 0;width:100%;';
+    editArea.innerHTML = `
+      <textarea class="slot-editor-textarea" style="min-height:80px;width:100%;">${esc(origText)}</textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn-pill-utility" onclick="cancelEditMemory('${esc(id)}')">Cancel</button>
+        <button class="btn-pill-utility" style="color:var(--primary);font-weight:600;" onclick="saveEditMemory('${esc(id)}')">
+          <i class="fa-solid fa-check"></i> Save
+        </button>
+      </div>
+    `;
+    contentEl.after(editArea);
+  }
+
+  function cancelEditMemory(id) {
+    const tile = q(`mem-${id}`);
+    if (!tile) return;
+    tile.querySelector('.inline-edit-area')?.remove();
+    const contentEl = tile.querySelector('.tile-content');
+    if (contentEl) contentEl.style.display = '';
+  }
+
+  async function saveEditMemory(id) {
+    const tile = q(`mem-${id}`);
+    if (!tile) return;
+    const ta = tile.querySelector('.inline-edit-area textarea');
+    if (!ta) return;
+    const newContent = ta.value.trim();
+    if (!newContent) {
+      showToast('Memory content cannot be empty', 'error');
+      return;
+    }
+    try {
+      await api(`/agentmemory/memories/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content: newContent })
+      });
+      showToast('Memory updated successfully', 'success');
+      lastDataJSON = '';
+      await loadData();
+    } catch (e) {
+      showToast('Update failed: ' + e.message, 'error');
+    }
   }
 
   async function deleteMemory(id) {
@@ -1836,7 +1924,7 @@
       return `<div class="empty-state-card"><i class="fa-solid fa-graduation-cap"></i><p>No lessons saved yet.</p></div>`;
     }
     return items.map(l => {
-      const confPercent = Math.min(100, Math.round((l.confidence / 10) * 100));
+      const confPercent = Math.min(100, Math.round(((l.confidence ?? 1.0) / 10) * 100));
       return `
         <div class="card-tile" id="les-${l.id}">
           <div class="tile-meta-row">
@@ -1846,16 +1934,16 @@
           <div class="tile-content" style="font-weight:600">${esc(l.content)}</div>
           ${l.context ? `<div style="font-family:var(--font-mono);font-size:13px;color:var(--body-muted);background:var(--canvas-parchment);border:1px solid var(--hairline);border-radius:var(--rounded-sm);padding:10px 14px;white-space:pre-wrap;overflow-x:auto">${esc(l.context)}</div>` : ''}
           <div class="lesson-conf-wrapper">
-            <span class="conf-metric-tag">${l.confidence.toFixed(1)}</span>
+            <span class="conf-metric-tag">${(l.confidence ?? 1.0).toFixed(1)}</span>
             <div class="conf-track-bar">
               <div class="conf-fill-bar" style="width:${confPercent}%"></div>
             </div>
             <span style="font-size:12px;color:var(--body-muted)">confidence level</span>
           </div>
           <div class="tile-footer-row">
-            ${(l.tags || '').split(',').filter(Boolean).map(t => `<span class="pill-label">${esc(t.trim())}</span>`).join('')}
+            ${(l.tags || '').split(',').filter(Boolean).map(t => `<span class="pill-label" style="cursor:pointer" title="Click to filter by ${esc(t.trim())}" onclick="filterByConcept('${esc(t.trim())}')">${esc(t.trim())}</span>`).join('')}
             <div class="card-actions-wrap">
-              <button class="btn-circle-utility" title="Delete lesson" onclick="deleteLesson(${l.id})">
+              <button class="btn-circle-utility" title="Delete lesson" onclick="deleteLesson(this.dataset.id)" data-id="${l.id}">
                 <i class="fa-solid fa-trash-can"></i>
               </button>
             </div>
@@ -1889,7 +1977,7 @@
             ${s.pinned ? '<i class="fa-solid fa-thumbtack" style="color:var(--primary)"></i>' : ''}
             ${esc(s.label)}
           </div>
-          <button class="btn-circle-utility" title="Delete slot" onclick="deleteSlotUI('${esc(s.label)}')">
+          <button class="btn-circle-utility" title="Delete slot" onclick="deleteSlotUI(this.dataset.label)" data-label="${esc(s.label)}">
             <i class="fa-solid fa-trash-can"></i>
           </button>
         </div>
@@ -1897,7 +1985,7 @@
         <textarea class="slot-editor-textarea" id="slot-editor-${esc(s.label)}" rows="4">${esc(s.content || '')}</textarea>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
           <span style="font-size:12px;color:var(--body-muted)"><span class="time-ago" data-timestamp="${esc(s.updated_at)}">${fmtAgo(s.updated_at)}</span> · scope: ${(s.scope || 'global')}</span>
-          <button class="btn-pill-utility" onclick="saveSlot('${esc(s.label)}')">
+          <button class="btn-pill-utility" onclick="saveSlot(this.dataset.label)" data-label="${esc(s.label)}">
             <i class="fa-solid fa-floppy-disk" style="color:var(--primary)"></i> Save
           </button>
         </div>

@@ -40,6 +40,7 @@ function runBackup() {
   try {
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(DB_PATH);
+    db.exec('PRAGMA busy_timeout = 10000;');
     
     // Escaped backup path for safe insertion into raw SQL string
     const escapedBackupPath = backupPath.replace(/'/g, "''");

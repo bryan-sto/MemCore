@@ -57,7 +57,7 @@ async function testRunner() {
   section('0. Liveness & Version Check');
   try {
     const live = await get('/livez');
-    if (live.status === 'ok' && live.version === '3.0.0') {
+    if (live.status === 'ok' && live.version && live.version.startsWith('3.')) {
       pass('Server online', `v${live.version} session=${live.session}`);
     } else {
       fail('Wrong version or unhealthy', JSON.stringify(live));

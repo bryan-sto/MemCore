@@ -27,10 +27,11 @@ const { DatabaseSync } = require('node:sqlite');
 // ─── 1. Config & Directories ─────────────────────────────────────────────────
 
 const PORT        = parseInt(process.env.MEMCORE_PORT || '3111', 10);
-const MEMCORE_DIR = 'D:\\Personal Project\\am';
+const HOST        = process.env.MEMCORE_HOST || '127.0.0.1';
+const MEMCORE_DIR = process.env.MEMCORE_DIR || (fs.existsSync('D:\\Personal Project\\am\\db.sqlite') ? 'D:\\Personal Project\\am' : __dirname);
 const DB_PATH     = path.join(MEMCORE_DIR, 'db.sqlite');
 const LOG_FILE    = path.join(MEMCORE_DIR, 'memcore.log');
-const VERSION     = '3.0.0';
+const VERSION     = '3.1.0';
 
 // Auto-capture filter: tool names containing these strings are ignored (too noisy)
 const HOOK_IGNORE_TOOLS = new Set([
@@ -81,7 +82,7 @@ console.error(`[MemCore v${VERSION}] Starting up. DB: ${DB_PATH}`);
 function checkServerAlive() {
   return new Promise((resolve) => {
     const req = http.request(
-      { hostname: 'localhost', port: PORT, path: '/agentmemory/livez', method: 'GET' },
+      { hostname: '127.0.0.1', port: PORT, path: '/agentmemory/livez', method: 'GET' },
       (res) => { resolve(res.statusCode === 200); }
     );
     req.on('error', () => resolve(false));
@@ -131,7 +132,7 @@ async function runMcpRelayMode() {
       try {
         const body = await new Promise((resolve, reject) => {
           const r = http.request(
-            { hostname: 'localhost', port: PORT, path: '/agentmemory/tools-list', method: 'GET' },
+            { hostname: '127.0.0.1', port: PORT, path: '/agentmemory/tools-list', method: 'GET' },
             (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }
           );
           r.on('error', reject);
@@ -154,22 +155,33 @@ async function runMcpRelayMode() {
       const { name, arguments: args } = params || {};
       const payload = JSON.stringify({ name, arguments: args || {} });
       try {
+        let statusCode = 200;
         const body = await new Promise((resolve, reject) => {
           const r = http.request(
             {
-              hostname: 'localhost', port: PORT,
+              hostname: '127.0.0.1', port: PORT,
               path: '/agentmemory/mcp-call',
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
             },
-            (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }
+            (res) => {
+              statusCode = res.statusCode || 200;
+              let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d));
+            }
           );
           r.on('error', reject);
           r.setTimeout(15000, () => { r.destroy(); reject(new Error('timeout')); });
           r.write(payload); r.end();
         });
         const result = JSON.parse(body);
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } }) + '\n');
+        const isErr = statusCode >= 400 || (result && Boolean(result.error));
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', id,
+          result: {
+            content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
+            isError: isErr
+          }
+        }) + '\n');
       } catch (e) {
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true } }) + '\n');
       }
@@ -190,6 +202,10 @@ async function runMcpRelayMode() {
         result: {},
       }) + '\n');
     }
+  });
+
+  rl2.on('close', () => {
+    process.exit(0);
   });
 
   // Keep process alive
@@ -470,30 +486,49 @@ function bootstrapMCPSession() {
 // ─── 5. Search Utilities: tokenise + BM25 + concept-graph expansion ───────────
 
 let pipelineInstance = null;
+let pipelinePromise = null;
+const embeddingLRUCache = new Map();
+const MAX_EMBEDDING_CACHE = 256;
 
 /** Generate 384-dimensional normalized vector embedding via local Wasm Transformers.js */
 async function getEmbedding(text) {
   if (!text) return null;
+  const trimmed = text.trim();
+  if (embeddingLRUCache.has(trimmed)) {
+    const cached = embeddingLRUCache.get(trimmed);
+    embeddingLRUCache.delete(trimmed);
+    embeddingLRUCache.set(trimmed, cached);
+    return cached;
+  }
   try {
-    if (!pipelineInstance) {
-      let transformers;
-      try {
-        transformers = require('@xenova/transformers');
-      } catch (e) {
-        const fallbackPath = path.join(MEMCORE_DIR, 'node_modules', '@xenova', 'transformers');
-        transformers = require(fallbackPath);
-      }
-      const { pipeline, env } = transformers;
-      env.cacheDir = path.join(MEMCORE_DIR, '.cache');
-      
-      // Enable Multi-Threading and SIMD for high-speed crash-free execution on Node v24+
-      env.backends.onnx.wasm.numThreads = 4;
-      env.backends.onnx.wasm.simd = true;
-      
-      pipelineInstance = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
+    if (!pipelinePromise) {
+      pipelinePromise = (async () => {
+        let transformers;
+        try {
+          transformers = require('@xenova/transformers');
+        } catch (e) {
+          const fallbackPath = path.join(MEMCORE_DIR, 'node_modules', '@xenova', 'transformers');
+          transformers = require(fallbackPath);
+        }
+        const { pipeline, env } = transformers;
+        env.cacheDir = path.join(MEMCORE_DIR, '.cache');
+        
+        // Enable Multi-Threading and SIMD for high-speed crash-free execution on Node v24+
+        env.backends.onnx.wasm.numThreads = 4;
+        env.backends.onnx.wasm.simd = true;
+        
+        return await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
+      })();
     }
+    pipelineInstance = await pipelinePromise;
     const output = await pipelineInstance(text, { pooling: 'mean', normalize: true });
-    return Array.from(output.data);
+    const vec = Array.from(output.data);
+    if (embeddingLRUCache.size >= MAX_EMBEDDING_CACHE) {
+      const firstKey = embeddingLRUCache.keys().next().value;
+      embeddingLRUCache.delete(firstKey);
+    }
+    embeddingLRUCache.set(trimmed, vec);
+    return vec;
   } catch (err) {
     console.error('[MemCore] Embedding error:', err.message);
     return null;
@@ -553,10 +588,14 @@ function bm25Rank(candidates, tokens, textField = 'content') {
       score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * docLen / avgDocLen));
     }
 
-    // Boost score if query tokens appear in concepts field (exact concept match = high signal)
+    // Boost score if query tokens appear in concepts, tags, or files field
     for (const t of tokens) {
-      if ((doc.concepts || '').toLowerCase().includes(t.toLowerCase())) {
+      const tl = t.toLowerCase();
+      if ((doc.concepts || '').toLowerCase().includes(tl) || (doc.tags || '').toLowerCase().includes(tl)) {
         score += 0.5;
+      }
+      if ((doc.files || '').toLowerCase().includes(tl)) {
+        score += 0.3;
       }
     }
 
@@ -605,24 +644,25 @@ function expandQueryConcepts(tokens, project = '', limit = 6) {
  * For every pair of concepts in the memory, increment their edge weight.
  */
 function indexConceptEdges(conceptsStr, project) {
-  const concepts = (conceptsStr || '')
+  const concepts = [...new Set((conceptsStr || '')
     .split(',')
     .map(c => c.trim().toLowerCase())
-    .filter(Boolean);
+    .filter(Boolean))];
 
   if (concepts.length < 2) return;
   const normProject = project || '';
-  const ts = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO concept_edges (concept_a, concept_b, weight, project)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT(concept_a, concept_b, project) DO UPDATE SET weight = weight + 1
+  `);
 
   for (let i = 0; i < concepts.length; i++) {
     for (let j = i + 1; j < concepts.length; j++) {
+      if (concepts[i] === concepts[j]) continue;
       const [a, b] = [concepts[i], concepts[j]].sort();
       try {
-        db.prepare(`
-          INSERT INTO concept_edges (concept_a, concept_b, weight, project)
-          VALUES (?, ?, 1, ?)
-          ON CONFLICT(concept_a, concept_b, project) DO UPDATE SET weight = weight + 1
-        `).run(a, b, normProject);
+        stmt.run(a, b, normProject);
       } catch (_) {}
     }
   }
@@ -633,7 +673,7 @@ function indexConceptEdges(conceptsStr, project) {
 /**
  * Save a memory, mirror to FTS5 + observations log, and index concept edges.
  */
-async function saveMemory(content, type = 'observation', concepts = '', files = '', project = '', source = 'mcp') {
+async function saveMemory(content, type = 'observation', concepts = '', files = '', project = '', source = 'mcp', sessionId = null) {
   const normProject  = project || defaultProject;
   const normSource   = source || 'mcp';
   const normConcepts = Array.isArray(concepts) ? concepts.join(',') : (concepts || '');
@@ -643,14 +683,27 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   const embedding = await getEmbedding(content);
   const embeddingStr = embedding ? JSON.stringify(embedding) : null;
 
-  // 1. Dedup pass on ingestion
+  // Polarity / negation keywords to prevent conflicting instruction overwrites
+  const POLARITY_TOKENS = new Set(['not', 'never', 'no', 'none', 'always', 'only', 'disable', 'disabled', 'enable', 'enabled', 'true', 'false', 'allow', 'deny', 'prevent', 'avoid']);
+  const contentTokens = new Set((tokenise(content) || []).map(t => t.toLowerCase()).filter(t => POLARITY_TOKENS.has(t)));
+
+  // 1. Dedup pass on ingestion (reinforce = false so candidates are not falsely boosted)
   try {
-    const candidates = await searchMemories(content, 3, normProject, 0, embedding);
+    const candidates = await searchMemories(content, 3, normProject, 0, embedding, false);
     for (const cand of candidates) {
       const exactMatch = cand.type === type && cand.content.trim().toLowerCase() === content.trim().toLowerCase();
-      const highlySimilar = cand.type === type && cand._cosine >= 0.90;
       
-      if (exactMatch || highlySimilar) {
+      let safeToMerge = exactMatch;
+      if (!exactMatch && cand.type === type && (cand._cosine ?? 0) >= 0.98) {
+        // High semantic similarity: verify no conflicting polarity keywords
+        const candTokens = new Set((tokenise(cand.content) || []).map(t => t.toLowerCase()).filter(t => POLARITY_TOKENS.has(t)));
+        const differsPolarity = [...contentTokens].some(t => !candTokens.has(t)) || [...candTokens].some(t => !contentTokens.has(t));
+        if (!differsPolarity) {
+          safeToMerge = true;
+        }
+      }
+      
+      if (safeToMerge) {
         // Merge concept tags
         const existingTags = new Set((cand.concepts || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean));
         normConcepts.split(',').map(t => t.trim().toLowerCase()).filter(Boolean).forEach(t => existingTags.add(t));
@@ -662,15 +715,17 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
         const mergedFiles = [...existingFiles].join(',');
 
         const ts = new Date().toISOString();
+        const sid = resolveSessionId(sessionId, normProject);
         db.prepare(`
           UPDATE memories
           SET confidence = MIN(1.0, confidence + 0.1),
               concepts = ?,
               files = ?,
               source = ?,
-              timestamp = ?
+              timestamp = ?,
+              session_id = ?
           WHERE id = ?
-        `).run(mergedConcepts, mergedFiles, normSource, ts, cand.id);
+        `).run(mergedConcepts, mergedFiles, normSource, ts, sid, cand.id);
 
         console.error(`[DB DEDUP] Merged memory duplicate on write. Existing ID: ${cand.id}. Score: ${cand.score}`);
 
@@ -682,9 +737,12 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
           `).run(cand.content, mergedConcepts, mergedFiles, cand.id);
         } catch (_) {}
 
+        // Index newly introduced concept edges
+        indexConceptEdges(mergedConcepts, normProject);
+
         return {
           id: cand.id,
-          session_id: cand.session_id,
+          session_id: sid,
           content: cand.content,
           type: cand.type,
           concepts: mergedConcepts,
@@ -704,7 +762,7 @@ async function saveMemory(content, type = 'observation', concepts = '', files = 
   // 2. Normal creation if not a duplicate
   const id           = crypto.randomUUID();
   const ts           = new Date().toISOString();
-  const sid          = resolveSessionId(null, normProject);
+  const sid          = resolveSessionId(sessionId, normProject);
 
   console.error(`[DB CREATE] saveMemory id=${id} type=${type} project=${normProject} concepts="${normConcepts}" content="${content.slice(0, 60)}"`);
 
@@ -765,7 +823,7 @@ function cosineSimilarity(vecA, vecB) {
  * 6. Combine Vector Similarity and BM25 scores for final ranking
  * 7. Optionally trim to token_budget (approx chars / 4)
  */
-async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, queryEmbedding = null) {
+async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, queryEmbedding = null, reinforce = true) {
   const normProject  = project || '';
   const rawTokens    = tokenise(query);
   const tokens       = expandQueryConcepts(rawTokens, normProject);
@@ -819,8 +877,9 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, q
   // Calculate BM25 ranking
   const bm25Scored = bm25Rank(results, tokens);
 
-  // Fuse with Cosine Similarity + recency
-  const fusedScored = bm25Scored.map(doc => {
+  // Fuse with Cosine Similarity + recency + RRF
+  const K_RRF = 60;
+  const withVector = bm25Scored.map((doc, bm25Index) => {
     let vectorScore = 0;
     if (queryVec && doc.embedding) {
       try {
@@ -828,18 +887,38 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, q
         vectorScore = cosineSimilarity(queryVec, docVec);
       } catch (_) {}
     }
-    // Combined score: Cosine similarity is base semantic score, BM25 adds term frequency match boost
-    const relevanceScore = vectorScore + (doc._bm25 ? Math.min(1.0, doc._bm25 * 0.1) : 0);
+    return { ...doc, _cosine: vectorScore, _bm25Rank: (doc._bm25 && doc._bm25 > 0) ? (bm25Index + 1) : null };
+  });
 
-    // Recency weight: slow half-life (~180 days), floored at 0.5 so old memories
-    // are deprioritized on ties but never fully buried — they're durable facts,
-    // not chat messages.
+  // Relevance floor: discard candidates with negligible similarity when no lexical match exists
+  const filtered = withVector.filter(doc => {
+    if (doc._bm25 && doc._bm25 > 0) return true;
+    return doc._cosine >= 0.25;
+  });
+
+  // Sort for vector rank list in RRF
+  const sortedByVector = [...filtered].sort((a, b) => b._cosine - a._cosine);
+  const vectorRankMap = new Map();
+  sortedByVector.forEach((doc, idx) => {
+    if (doc._cosine > 0) vectorRankMap.set(doc.id, idx + 1);
+  });
+
+  const fusedScored = filtered.map(doc => {
+    const vRank = vectorRankMap.get(doc.id) || null;
+    const bRank = doc._bm25Rank || null;
+
+    // Reciprocal Rank Fusion component
+    const rrfScore = (bRank ? 1 / (K_RRF + bRank) : 0) + (vRank ? 1 / (K_RRF + vRank) : 0);
+
+    // Hybrid combined score: base similarity + BM25 match boost + RRF ranking
+    const relevanceScore = (doc._cosine || 0) + (doc._bm25 ? Math.min(1.0, doc._bm25 * 0.1) : 0) + (rrfScore * 10);
+
     const ageMs = Date.now() - new Date(doc.timestamp).getTime();
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
     const recencyWeight = isNaN(ageDays) ? 1 : (0.5 + 0.5 * Math.pow(0.5, ageDays / 180));
 
     const finalScore = relevanceScore * recencyWeight;
-    return { ...doc, _cosine: vectorScore, _recency: recencyWeight, score: finalScore };
+    return { ...doc, _recency: recencyWeight, score: finalScore };
   });
 
   // Sort by final fused score
@@ -847,14 +926,18 @@ async function searchMemories(query, limit = 5, project = '', tokenBudget = 0, q
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 
-  // Reinforce confidence for returned memories (neural-pathway style traversal) and update last_referenced_at
-  const refTs = new Date().toISOString();
-  for (const r of ranked) {
-    try {
-      db.prepare('UPDATE memories SET confidence = MIN(1.0, confidence + 0.1), last_referenced_at = ? WHERE id = ?').run(refTs, r.id);
-      r.confidence = Math.min(1.0, (r.confidence ?? 1.0) + 0.1);
-      r.last_referenced_at = refTs;
-    } catch (_) {}
+  // Reinforce confidence only if reinforce === true and memory had meaningful relevance
+  if (reinforce) {
+    const refTs = new Date().toISOString();
+    for (const r of ranked) {
+      if ((r._bm25 && r._bm25 > 0) || (r._cosine && r._cosine >= 0.35)) {
+        try {
+          db.prepare('UPDATE memories SET confidence = MIN(1.0, confidence + 0.1), last_referenced_at = ? WHERE id = ?').run(refTs, r.id);
+          r.confidence = Math.min(1.0, (r.confidence ?? 1.0) + 0.1);
+          r.last_referenced_at = refTs;
+        } catch (_) {}
+      }
+    }
   }
 
   // Token-budget trim (approximate: chars / 4 ≈ tokens)
@@ -893,8 +976,18 @@ function saveLesson(content, context = '', confidence = 1.0, project = '', tags 
     return { id, content, context: context || '', confidence: inc, project: normProject, tags: normTags, updated_at: ts };
   } catch (err) {
     if (err.message.includes('UNIQUE constraint failed')) {
-      db.prepare('UPDATE lessons SET confidence = confidence + ?, updated_at = ? WHERE content = ?').run(inc, ts, content);
+      db.prepare(`
+        UPDATE lessons 
+        SET confidence = confidence + ?, 
+            context = CASE WHEN ? != '' THEN ? ELSE context END, 
+            tags = CASE WHEN ? != '' THEN ? ELSE tags END, 
+            updated_at = ? 
+        WHERE content = ?
+      `).run(inc, context || '', context || '', normTags, normTags, ts, content);
       const updated = db.prepare('SELECT * FROM lessons WHERE content = ?').get(content);
+      try {
+        db.prepare('UPDATE lessons_fts SET context = ? WHERE content_id = ?').run(updated.context || '', String(updated.id));
+      } catch (_) {}
       console.error(`[DB UPDATE] lesson reinforced. confidence=${updated.confidence}`);
       return updated;
     }
@@ -931,13 +1024,15 @@ function searchLessons(query, project = '', minConfidence = 0.0, limit = 5) {
   if (results.length === 0 && tokens.length > 0) {
     const cc = tokens.map(() => 'content LIKE ?').join(' OR ');
     const xc = tokens.map(() => 'context LIKE ?').join(' OR ');
+    const tc = tokens.map(() => 'tags LIKE ?').join(' OR ');
     const params = [];
+    tokens.forEach(t => params.push(`%${t}%`));
     tokens.forEach(t => params.push(`%${t}%`));
     tokens.forEach(t => params.push(`%${t}%`));
     if (normProject) params.push(normProject);
     params.push(minConfidence, limit * 3);
     results = db.prepare(`
-      SELECT * FROM lessons WHERE ((${cc}) OR (${xc})) ${normProject ? 'AND project = ?' : ''} AND confidence >= ? ORDER BY confidence DESC LIMIT ?
+      SELECT * FROM lessons WHERE ((${cc}) OR (${xc}) OR (${tc})) ${normProject ? 'AND project = ?' : ''} AND confidence >= ? ORDER BY confidence DESC LIMIT ?
     `).all(...params);
   }
 
@@ -949,13 +1044,14 @@ function replaceSlot(label, content) {
   const ts       = new Date().toISOString();
   const existing = db.prepare('SELECT size_limit FROM slots WHERE label = ?').get(label);
   const limit    = existing ? existing.size_limit : 1048576;
-  if (Buffer.byteLength(content, 'utf8') > limit) {
-    throw new Error(`Slot "${label}" content (${Buffer.byteLength(content, 'utf8')}B) exceeds size_limit (${limit}B).`);
+  const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
+  if (Buffer.byteLength(contentStr, 'utf8') > limit) {
+    throw new Error(`Slot "${label}" content (${Buffer.byteLength(contentStr, 'utf8')}B) exceeds size_limit (${limit}B).`);
   }
   db.prepare(`
     INSERT INTO slots (label, content, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(label) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
-  `).run(label, content, ts);
+  `).run(label, contentStr, ts);
   return db.prepare('SELECT * FROM slots WHERE label = ?').get(label);
 }
 
@@ -963,7 +1059,9 @@ function replaceSlot(label, content) {
 function appendSlot(label, text) {
   const ts       = new Date().toISOString();
   const existing = db.prepare('SELECT content, size_limit FROM slots WHERE label = ?').get(label);
-  const newContent = existing ? (existing.content + text) : text;
+  const existingContent = (existing && existing.content != null) ? existing.content : '';
+  const textStr = typeof text === 'string' ? text : String(text);
+  const newContent = existingContent + textStr;
   const limit    = existing ? existing.size_limit : 1048576;
   if (Buffer.byteLength(newContent, 'utf8') > limit) {
     throw new Error(`Slot "${label}" would exceed size_limit (${limit}B) after append.`);
@@ -973,6 +1071,11 @@ function appendSlot(label, text) {
     ON CONFLICT(label) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
   `).run(label, newContent, ts);
   return db.prepare('SELECT * FROM slots WHERE label = ?').get(label);
+}
+
+/** Get a slot by label. Returns slot object or null. */
+function getSlot(label) {
+  return db.prepare('SELECT * FROM slots WHERE label = ?').get(label) || null;
 }
 
 /** Create a slot. Throws if label already exists. */
@@ -1065,7 +1168,9 @@ async function summarizeSession(sessionId) {
     'session_summary',
     topConcepts.join(','),
     '',
-    project
+    project,
+    'system',
+    sid
   );
 }
 
@@ -1168,10 +1273,10 @@ async function processHookEvent(event, data = {}) {
     }
 
     case 'SessionEnd': {
-      const ts = new Date().toISOString();
       const sid = resolveSessionId(null, data.project, data.cwd);
-      db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(ts, sid);
       const summary = await summarizeSession(sid);
+      const ts = new Date().toISOString();
+      db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(ts, sid);
       return { status: 'ended', sessionId: sid, summary_id: summary?.id || null };
     }
 
@@ -1198,6 +1303,81 @@ function exportAll() {
     slots:         db.prepare('SELECT * FROM slots ORDER BY label ASC').all(),
     concept_edges: db.prepare('SELECT * FROM concept_edges ORDER BY weight DESC LIMIT 500').all(),
     command_logs:  db.prepare('SELECT * FROM command_logs ORDER BY timestamp DESC').all()
+  };
+}
+
+/**
+ * Build a structured markdown context-pack for agent priming.
+ * Aggregates:
+ * 1. Active goals (from slot 'ACTIVE_GOALS' or pinned slots)
+ * 2. Recent session summary for project
+ * 3. Key conventions and architectural decisions
+ * 4. High-confidence lessons
+ *
+ * @param {string} project - Target project name
+ * @param {number} tokenBudget - Max tokens (default 1500)
+ * @returns {object} { project, token_budget, estimated_tokens, context_pack }
+ */
+function buildContextPack(project = '', tokenBudget = 1500) {
+  const normProject = project || defaultProject;
+  const budgetTokens = (tokenBudget && tokenBudget > 0) ? tokenBudget : 1500;
+  const maxChars = budgetTokens * 4; // ~4 chars per token rule of thumb
+
+  const sections = [];
+
+  // 1. Active Goals from slots
+  const activeGoalSlot = db.prepare("SELECT label, content FROM slots WHERE label = 'ACTIVE_GOALS'").get();
+  const pinnedSlots = db.prepare("SELECT label, content FROM slots WHERE pinned = 1 AND label != 'ACTIVE_GOALS'").all();
+
+  const slotBlocks = [];
+  if (activeGoalSlot && activeGoalSlot.content && activeGoalSlot.content.trim()) {
+    slotBlocks.push(`#### ACTIVE_GOALS\n${activeGoalSlot.content.trim()}`);
+  }
+  for (const ps of pinnedSlots) {
+    if (ps.content && ps.content.trim()) {
+      slotBlocks.push(`#### ${ps.label}\n${ps.content.trim()}`);
+    }
+  }
+  if (slotBlocks.length > 0) {
+    sections.push(`### Active Goals & Slots\n${slotBlocks.join('\n\n')}`);
+  }
+
+  // 2. Latest Session Summary
+  const lastSummary = db.prepare(
+    "SELECT content, timestamp FROM memories WHERE project = ? AND type = 'session_summary' ORDER BY timestamp DESC LIMIT 1"
+  ).get(normProject);
+  if (lastSummary && lastSummary.content) {
+    sections.push(`### Last Session Summary\n${lastSummary.content.trim()}`);
+  }
+
+  // 3. Key Architecture & Conventions
+  const conventions = db.prepare(
+    "SELECT type, content, confidence FROM memories WHERE project = ? AND type IN ('convention', 'arch', 'decision') ORDER BY confidence DESC, timestamp DESC LIMIT 5"
+  ).all(normProject);
+  if (conventions.length > 0) {
+    const convItems = conventions.map(c => `- [${c.type}] ${c.content.trim().replace(/\\s+/g, ' ')}`);
+    sections.push(`### Architecture & Conventions\n${convItems.join('\n')}`);
+  }
+
+  // 4. Key Lessons Learned
+  const lessons = db.prepare(
+    "SELECT content, confidence FROM lessons WHERE project = ? ORDER BY confidence DESC, updated_at DESC LIMIT 5"
+  ).all(normProject);
+  if (lessons.length > 0) {
+    const lessonItems = lessons.map(l => `- (confidence: ${(l.confidence ?? 1.0).toFixed(1)}) ${l.content.trim().replace(/\\s+/g, ' ')}`);
+    sections.push(`### Learned Best Practices\n${lessonItems.join('\n')}`);
+  }
+
+  let fullMarkdown = sections.join('\n\n');
+  if (fullMarkdown.length > maxChars) {
+    fullMarkdown = fullMarkdown.slice(0, maxChars - 30) + '\n... [truncated to budget]';
+  }
+
+  return {
+    project: normProject,
+    token_budget: budgetTokens,
+    estimated_tokens: Math.ceil(fullMarkdown.length / 4),
+    context_pack: fullMarkdown
   };
 }
 
@@ -1317,22 +1497,20 @@ function consolidateDatabase() {
       const currentConf = m.confidence ?? 1.0;
       let multiplier = 0.90; // default for observation
       
+      const isDurable = ['arch', 'decision', 'convention', 'session_summary'].includes(m.type);
+      const floor = isDurable ? 0.50 : 0.0;
+
       if (m.type === 'hook_observation' || m.type === 'user_prompt') {
         multiplier = 0.85;
       } else if (m.type === 'env' || m.type === 'bug') {
         multiplier = 0.95;
-      } else if (
-        m.type === 'arch' || 
-        m.type === 'decision' || 
-        m.type === 'convention' || 
-        m.type === 'session_summary'
-      ) {
+      } else if (isDurable) {
         multiplier = 0.98;
       }
 
-      const newConf = currentConf * multiplier;
+      const newConf = Math.max(floor, Number((currentConf * multiplier).toFixed(4)));
 
-      if (newConf < 0.2) {
+      if (newConf < 0.20 && !isDurable) {
         // Prune memory
         db.prepare('DELETE FROM memories WHERE id = ?').run(m.id);
         try { db.prepare('DELETE FROM memories_fts WHERE content_id = ?').run(m.id); } catch (_) {}
@@ -1350,9 +1528,10 @@ function consolidateDatabase() {
 
     for (const l of lessons) {
       const currentConf = l.confidence ?? 1.0;
-      const newConf = currentConf * 0.90; // lessons decay at 10% rate
+      const lessonFloor = currentConf >= 2.0 ? 0.50 : 0.0;
+      const newConf = Math.max(lessonFloor, Number((currentConf * 0.90).toFixed(4))); // lessons decay at 10% rate
 
-      if (newConf < 0.3) {
+      if (newConf < 0.30 && currentConf < 2.0) {
         db.prepare('DELETE FROM lessons WHERE id = ?').run(l.id);
         try { db.prepare('DELETE FROM lessons_fts WHERE content_id = ?').run(String(l.id)); } catch (_) {}
         lessonsPruned++;
@@ -1366,7 +1545,25 @@ function consolidateDatabase() {
     const nowSec = Date.now() / 1000;
     const ccrPruned = db.prepare('DELETE FROM ccr_cache WHERE (created_at + ttl_seconds) < ?').run(nowSec).changes;
 
-    // 4. Compact database
+    // 4. Prune command_logs: retain max 5000 records or 30 days
+    try {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      db.prepare('DELETE FROM command_logs WHERE timestamp < ?').run(thirtyDaysAgo);
+      const countRow = db.prepare('SELECT count(*) as c FROM command_logs').get();
+      if (countRow && countRow.c > 5000) {
+        db.prepare('DELETE FROM command_logs WHERE id IN (SELECT id FROM command_logs ORDER BY timestamp ASC LIMIT ?)').run(countRow.c - 5000);
+      }
+    } catch (_) {}
+
+    // 5. Prune observations ledger: cap at 2000 entries
+    try {
+      const obsCount = db.prepare('SELECT count(*) as c FROM observations').get();
+      if (obsCount && obsCount.c > 2000) {
+        db.prepare('DELETE FROM observations WHERE id IN (SELECT id FROM observations ORDER BY timestamp ASC LIMIT ?)').run(obsCount.c - 2000);
+      }
+    } catch (_) {}
+
+    // 6. Compact database
     db.exec('PRAGMA incremental_vacuum(100);');
 
     db.exec('COMMIT;');
@@ -1649,11 +1846,52 @@ async function routeHttpRequest(url, method, body, sendJson) {
     return;
   }
 
+  // PUT or PATCH /agentmemory/memories/:id (In-place update)
+  const memMatch = pathName.match(/^\/agentmemory\/memories\/([^/]+)$/);
+  if (memMatch && (method === 'PUT' || method === 'PATCH')) {
+    const id = memMatch[1];
+    const existing = db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+    if (!existing) {
+      sendJson(404, { error: `Memory not found: ${id}` });
+      return;
+    }
+    const content = body.content !== undefined ? String(body.content) : existing.content;
+    const type = body.type !== undefined ? String(body.type) : existing.type;
+    const concepts = body.concepts !== undefined ? (Array.isArray(body.concepts) ? body.concepts.join(',') : String(body.concepts)) : existing.concepts;
+    const files = body.files !== undefined ? (Array.isArray(body.files) ? body.files.join(',') : String(body.files)) : existing.files;
+
+    let embeddingStr = existing.embedding;
+    if (body.content !== undefined && body.content !== existing.content) {
+      const emb = await getEmbedding(content);
+      embeddingStr = emb ? JSON.stringify(emb) : null;
+    }
+
+    db.prepare(`
+      UPDATE memories
+      SET content = ?, type = ?, concepts = ?, files = ?, embedding = ?
+      WHERE id = ?
+    `).run(content, type, concepts, files, embeddingStr, id);
+
+    try {
+      db.prepare(`
+        UPDATE memories_fts
+        SET content = ?, concepts = ?, files = ?
+        WHERE content_id = ?
+      `).run(content, concepts, files, id);
+    } catch (_) {}
+
+    if (concepts) {
+      indexConceptEdges(concepts, existing.project);
+    }
+
+    sendJson(200, { success: true, id, content, type, concepts, files });
+    return;
+  }
+
   // DELETE /agentmemory/memories/:id
-  const memDeleteMatch = pathName.match(/^\/agentmemory\/memories\/([^/]+)$/);
-  if (memDeleteMatch && method === 'DELETE') {
-    const deleted = deleteMemory(memDeleteMatch[1]);
-    sendJson(deleted ? 200 : 404, { success: deleted, id: memDeleteMatch[1] });
+  if (memMatch && method === 'DELETE') {
+    const deleted = deleteMemory(memMatch[1]);
+    sendJson(deleted ? 200 : 404, { success: deleted, id: memMatch[1] });
     return;
   }
 
@@ -1690,10 +1928,10 @@ async function routeHttpRequest(url, method, body, sendJson) {
 
   // POST /agentmemory/session/end
   if (pathName === '/agentmemory/session/end' && method === 'POST') {
-    const ts = new Date().toISOString();
     const sid = resolveSessionId(body.session_id, body.project, body.cwd);
-    db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ts, sid);
     const summary = body.summarize !== false ? await summarizeSession(sid) : null;
+    const ts = new Date().toISOString();
+    db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ts, sid);
     sendJson(200, { status: 'ended', sessionId: sid, summary_id: summary?.id || null });
     return;
   }
@@ -1791,7 +2029,26 @@ async function routeHttpRequest(url, method, body, sendJson) {
 
   // GET /agentmemory/slots
   if ((pathName === '/agentmemory/slots' || pathName === '/agentmemory/slot') && method === 'GET') {
+    const labelQuery = parsedUrl.searchParams.get('label');
+    if (labelQuery) {
+      const slot = getSlot(labelQuery);
+      sendJson(200, slot ? [slot] : []);
+      return;
+    }
     sendJson(200, db.prepare('SELECT * FROM slots ORDER BY pinned DESC, label ASC').all());
+    return;
+  }
+
+  // GET /agentmemory/slot/:label
+  const slotMatch = pathName.match(/^\/agentmemory\/slot\/([^/]+)$/);
+  if (slotMatch && method === 'GET') {
+    const label = decodeURIComponent(slotMatch[1]);
+    const slot = getSlot(label);
+    if (slot) {
+      sendJson(200, slot);
+    } else {
+      sendJson(404, { error: `Slot not found: ${label}` });
+    }
     return;
   }
 
@@ -1820,10 +2077,17 @@ async function routeHttpRequest(url, method, body, sendJson) {
   }
 
   // DELETE /agentmemory/slot/:label
-  const slotDeleteMatch = pathName.match(/^\/agentmemory\/slot\/([^/]+)$/);
-  if (slotDeleteMatch && method === 'DELETE') {
-    sendJson(deleteSlot(decodeURIComponent(slotDeleteMatch[1])) ? 200 : 404,
-      { success: true, label: slotDeleteMatch[1] });
+  if (slotMatch && method === 'DELETE') {
+    const label = decodeURIComponent(slotMatch[1]);
+    sendJson(deleteSlot(label) ? 200 : 404,
+      { success: true, label });
+    return;
+  }
+
+  // GET /agentmemory/context-pack
+  if (pathName === '/agentmemory/context-pack' && method === 'GET') {
+    const tb = parseInt(parsedUrl.searchParams.get('token_budget') || '1500', 10);
+    sendJson(200, buildContextPack(projectParam, tb));
     return;
   }
 
@@ -1915,7 +2179,7 @@ const server = http.createServer((req, res) => {
 
   // Static dashboard
   if (req.method === 'GET' && ['/', '/viewer', '/viewer/'].includes(parsedUrl.pathname)) {
-    const htmlPath = path.join(__dirname, 'viewer.html');
+    const htmlPath = fs.existsSync(path.join(MEMCORE_DIR, 'viewer.html')) ? path.join(MEMCORE_DIR, 'viewer.html') : path.join(__dirname, 'viewer.html');
     fs.readFile(htmlPath, 'utf8', (err, data) => {
       if (err) { res.writeHead(500); res.end(`viewer.html missing: ${err.message}`); return; }
       res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -1942,8 +2206,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.error(`[MemCore REST] http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.error(`[MemCore REST] http://${HOST}:${PORT}`);
   bootstrapRESTSession();
 
   // Automate memory decay/consolidation in the background every 6 hours
@@ -2223,6 +2487,17 @@ const toolsRegistry = [
       },
     },
   },
+  {
+    name: 'memory_context_pack',
+    description: 'Generate a structured, token-budgeted context injection block (active goals, latest session summary, top conventions, and learned lessons) for prompt priming.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project:      { type: 'string', description: 'Target project name.' },
+        token_budget: { type: 'number', description: 'Max token budget for context pack (default 1500 tokens / ~6000 chars).' },
+      },
+    },
+  },
 ];
 
 // ─── 10. MCP Tool Executor ─────────────────────────────────────────────────────
@@ -2304,6 +2579,8 @@ async function executeMcpTool(name, args) {
     }
     case 'memory_hook':
       return await processHookEvent(args.event, args);
+    case 'memory_context_pack':
+      return buildContextPack(args.project, args.token_budget);
     default:
       throw new Error(`Unknown tool: '${name}'`);
   }
@@ -2363,6 +2640,7 @@ rl.on('line', async line => {
     console.error('[MCP parse error]', err.message);
   }
 });
+rl.on('close', () => shutdown('stdin_closed'));
 
 // ─── 12. Graceful Shutdown ─────────────────────────────────────────────────────
 
@@ -2376,7 +2654,7 @@ async function shutdown(signal) {
       .run(new Date().toISOString(), sid);
   } catch (_) {}
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (_) {}
-  server.close();
+  try { server.close(); } catch (_) {}
   process.exit(0);
 }
 
