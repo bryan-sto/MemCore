@@ -1,0 +1,11 @@
+{
+  "name": "agentmemory",
+  "description": "MemCore - Lightweight Local Memory Server",
+  "version": "3.1.0",
+  "mcpServers": {
+    "agentmemory": {
+      "command": "node",
+      "args": ["index.js"]
+    }
+  }
+}

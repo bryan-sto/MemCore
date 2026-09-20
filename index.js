@@ -28,7 +28,18 @@ const { DatabaseSync } = require('node:sqlite');
 
 const PORT        = parseInt(process.env.MEMCORE_PORT || '3111', 10);
 const HOST        = process.env.MEMCORE_HOST || '127.0.0.1';
-const MEMCORE_DIR = process.env.MEMCORE_DIR || (fs.existsSync('D:\\Personal Project\\am\\db.sqlite') ? 'D:\\Personal Project\\am' : __dirname);
+function resolveMemcoreDir() {
+  if (process.env.MEMCORE_DIR) return process.env.MEMCORE_DIR;
+  if (fs.existsSync('D:\\Personal Project\\am\\db.sqlite')) return 'D:\\Personal Project\\am';
+  if (fs.existsSync(path.join(__dirname, 'db.sqlite'))) return __dirname;
+  const fallback = path.join(os.homedir(), '.memcore');
+  if (!fs.existsSync(fallback)) {
+    try { fs.mkdirSync(fallback, { recursive: true }); } catch (_) {}
+  }
+  return fallback;
+}
+
+const MEMCORE_DIR = resolveMemcoreDir();
 const DB_PATH     = path.join(MEMCORE_DIR, 'db.sqlite');
 const LOG_FILE    = path.join(MEMCORE_DIR, 'memcore.log');
 const VERSION     = '3.1.0';
